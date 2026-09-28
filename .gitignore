@@ -1,0 +1,32 @@
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+src-tauri/target/
+src-tauri/gen/
+
+# Local EPUB fixtures and catalog data
+testLibrary/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local settings, secrets, and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Logs and operating-system/editor artifacts
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

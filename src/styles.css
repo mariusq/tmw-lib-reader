@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme { --font-sans: "Yu Gothic UI", "Yu Gothic", Meiryo, "Hiragino Kaku Gothic ProN", system-ui, sans-serif; }
+
+:root { color-scheme: dark; font-family: var(--font-sans); background: #0c0a09; }
+body { margin: 0; min-width: 320px; }
+button { font: inherit; }
+.control { width: 100%; border: 1px solid rgb(255 255 255 / 0.1); border-radius: 0.5rem; background: rgb(28 25 23); padding: 0.65rem 0.75rem; color: rgb(231 229 228); }
+.primary { border-radius: 0.75rem; background: #fbbf24; padding: 0.75rem 1.25rem; font-weight: 600; color: #1c1917; transition: background 150ms; }
+.primary:hover { background: #fcd34d; }
+.detail-panel { position: fixed; inset: 0 0 0 auto; z-index: 20; width: min(34rem, 100vw); overflow-y: auto; border-left: 1px solid rgb(255 255 255 / .12); background: rgb(28 25 23); padding: 1.5rem; box-shadow: -16px 0 40px rgb(0 0 0 / .35); }

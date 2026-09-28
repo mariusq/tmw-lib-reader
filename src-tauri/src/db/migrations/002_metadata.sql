@@ -1,0 +1,2 @@
+-- Phase 4 records metadata in the existing books columns.  This checkpoint makes
+-- the schema version explicit so future migrations have a safe boundary.

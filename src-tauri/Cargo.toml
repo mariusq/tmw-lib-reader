@@ -1,0 +1,32 @@
+[package]
+name = "tmw-epub-library"
+version = "0.1.0"
+description = "A local-first EPUB library browser"
+authors = ["TMW Library"]
+edition = "2021"
+
+[lib]
+name = "tmw_epub_library_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "tmw-epub-library"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5.0", features = [] }
+
+[dependencies]
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.9.5", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.4.0"
+tauri-plugin-opener = "2.5.0"
+quick-xml = "0.37.2"
+unicode-normalization = "0.1.24"
+zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
+# Lindera embeds IPADIC into the Windows binary so reading derivation stays offline.
+lindera = { version = "5.0.0", features = ["embed-ipadic"] }
+
+[dev-dependencies]
+tempfile = "3.14.0"
