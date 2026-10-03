@@ -8,6 +8,7 @@ src-tauri/gen/
 
 # Local EPUB fixtures and catalog data
 testLibrary/
+jmdict-eng/
 *.db
 *.db-shm
 *.db-wal

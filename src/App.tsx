@@ -1,5 +1,6 @@
 import { LibraryShell } from "./components/LibraryShell";
+import { Onboarding } from "./components/Onboarding";
 
 export function App() {
-  return <LibraryShell />;
+  return <Onboarding><LibraryShell /></Onboarding>;
 }

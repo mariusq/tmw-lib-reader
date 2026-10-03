@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePassageRequest {
+    pub book_id: i64,
+    pub surface: String,
+    pub headword: Option<String>,
+    pub reading: Option<String>,
+    pub sentence: String,
+    pub note: String,
+    pub location_cfi: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPassage {
+    pub id: i64,
+    pub book_id: i64,
+    pub book_title: String,
+    pub surface: String,
+    pub headword: Option<String>,
+    pub reading: Option<String>,
+    pub sentence: String,
+    pub note: String,
+    pub location_cfi: String,
+    pub source_size: i64,
+    pub source_modified: i64,
+    pub is_available: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Book {
@@ -41,6 +70,8 @@ pub struct BrowserBook {
     pub created_at: i64,
     pub modified_time: i64,
     pub needs_metadata: bool,
+    pub is_available: bool,
+    pub is_finished: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +85,68 @@ pub struct BookDetails {
     pub effective_cover_path: Option<String>,
     pub override_values: BookOverride,
     pub tags: Vec<(i64, String)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderBook {
+    pub id: i64,
+    pub file_path: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryEntry {
+    pub id: i64,
+    pub term: String,
+    pub reading: Option<String>,
+    pub definitions: Vec<String>,
+    pub part_of_speech: Vec<String>,
+    pub dictionary_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionarySummary {
+    pub id: i64,
+    pub name: String,
+    pub source_path: String,
+    pub enabled: bool,
+    pub imported_at: i64,
+    pub entry_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderGroupBook {
+    pub id: i64,
+    pub effective_title: String,
+    pub effective_volume: String,
+    pub file_name: String,
+    pub suggested_volume: Option<f64>,
+    pub has_series_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderGroup {
+    pub parent_folder_path: String,
+    pub books: Vec<FolderGroupBook>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCollectionRequest {
+    pub name: String,
+    pub book_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignSeriesRequest {
+    pub series_name: String,
+    pub book_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -82,6 +175,8 @@ pub struct BrowseBooksRequest {
     pub collection_id: Option<i64>,
     pub needs_metadata: bool,
     #[serde(default)]
+    pub hide_duplicate_titles: bool,
+    #[serde(default)]
     pub query: String,
     pub sort: String,
     pub offset: i64,
@@ -108,4 +203,22 @@ pub struct NewBook<'a> {
     pub file_name: &'a str,
     pub file_size: i64,
     pub modified_time: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanUpsert {
+    pub book_id: i64,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeBook {
+    pub id: i64,
+    pub title: String,
+    pub creator: String,
+    pub cover_path: Option<String>,
+    pub last_read_at: i64,
+    pub has_location: bool,
+    pub is_available: bool,
 }

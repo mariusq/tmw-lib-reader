@@ -17,7 +17,7 @@ path = "src/main.rs"
 tauri-build = { version = "2.5.0", features = [] }
 
 [dependencies]
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.9.5", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.4.0"
@@ -27,6 +27,9 @@ unicode-normalization = "0.1.24"
 zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
 # Lindera embeds IPADIC into the Windows binary so reading derivation stays offline.
 lindera = { version = "5.0.0", features = ["embed-ipadic"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 
 [dev-dependencies]
 tempfile = "3.14.0"

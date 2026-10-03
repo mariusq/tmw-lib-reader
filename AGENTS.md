@@ -36,399 +36,125 @@ Core principles:
 5. Optimize for browsing and finding books, not an initial full-text index of book contents.
 6. Store bulky, regenerable cover thumbnails in a separate user-configurable cache location; never in a source-library directory.
 
-Implement in this order. At the end of every numbered phase, run the relevant checks and report what was completed before proceeding.
+The original feature phases are complete. Preserve their behavior and tests. Continue with the optimization phases below unless the user explicitly requests otherwise.
 
-Implementation status: Phases 1 through 5 are complete. Begin further work with Phase 6 unless the user explicitly requests otherwise.
+Implement in this order. At the end of every numbered phase, run the relevant checks, record comparative timings where applicable, and report what was completed before proceeding.
 
-## Phase 1 — Project setup
+## Optimization Phase 1 — Establish performance baselines
 
-1. Create a Tauri v2 project using React, TypeScript, and Vite.
-2. Add Tailwind CSS.
-3. Establish this structure:
-   - src/components
-   - src/features/library
-   - src/features/books
-   - src/features/reader
-   - src/lib
-   - src-tauri/src
-   - src-tauri/src/db
-   - src-tauri/src/services
-   - src-tauri/src/models
-4. Add linting, formatting, and a test setup.
-5. Create a simple responsive application shell:
-   - sidebar
-   - main content area
-   - empty state
-6. Use a clean dark-mode-capable visual design with good Japanese font fallback support.
+1. Add structured timing around:
+   - filesystem discovery
+   - catalog upserts
+   - EPUB metadata parsing
+   - cover extraction and encoding
+   - Japanese reading derivation
+   - search-document updates
+   - missing-file reconciliation
+2. Record total duration, books discovered, books changed, books skipped, extraction failures, and throughput.
+3. Create repeatable benchmarks or ignored performance tests for a generated large catalog fixture without committing source EPUBs.
+4. Measure initial import, unchanged rescan, changed-book rescan, search-index rebuild, and application startup separately.
+5. Keep logs local and never include EPUB contents.
 
 Acceptance criteria:
-- The desktop application launches.
-- The React UI renders inside Tauri.
-- There are no TypeScript or Rust compile errors.
+- A developer can identify which stages dominate an import from local timing output.
+- Baselines exist for at least 10,000 catalog rows and a representative EPUB fixture set.
+- Performance instrumentation does not materially slow normal scans when verbose diagnostics are disabled.
 
-## Phase 2 — SQLite catalog and migrations
+## Optimization Phase 2 — Batch catalog writes and eliminate duplicate work
 
-Use SQLite in Tauri’s application data directory. Enable foreign keys and WAL mode.
-
-Create migrations and database access functions for these tables:
-
-library_roots:
-- id
-- path (unique)
-- display_name
-- added_at
-- last_scanned_at
-
-books:
-- id
-- library_root_id
-- file_path (unique)
-- parent_folder_path
-- file_name
-- file_size
-- modified_time
-- content_hash nullable
-- discovered_title nullable
-- discovered_creator nullable
-- discovered_language nullable
-- discovered_identifier nullable
-- discovered_series nullable
-- discovered_series_index nullable
-- discovered_cover_path nullable
-- extraction_status
-- extraction_error nullable
-- created_at
-- updated_at
-
-book_overrides:
-- book_id (unique)
-- title nullable
-- creator nullable
-- series_name nullable
-- volume_label nullable
-- cover_path nullable
-- notes nullable
-- updated_at
-
-tags:
-- id
-- name (unique)
-
-book_tags:
-- book_id
-- tag_id
-
-collections:
-- id
-- name
-- created_at
-
-collection_books:
-- collection_id
-- book_id
-- sort_order nullable
-
-app_settings:
-- key
-- value
-
-Also create useful indexes for:
-- books.library_root_id
-- books.parent_folder_path
-- books.discovered_title
-- books.discovered_creator
-- tags.name
-
-Implement a database abstraction layer; UI code must not directly execute SQL.
+1. Replace per-book autocommit operations with explicit, bounded SQLite transactions.
+2. Prepare and reuse statements for scan lookups, inserts, updates, and extraction-result writes.
+3. Return the book ID and changed state from the scan upsert; do not query the row again by path.
+4. Do not build a search document before metadata extraction when it will immediately be replaced.
+5. Refresh each changed book's search document once, after final metadata is available.
+6. Batch missing-file reconciliation without retaining an unnecessarily large duplicate path representation in memory.
+7. Preserve user overrides, tags, collections, reading progress, and unavailable-book recovery behavior.
 
 Acceptance criteria:
-- Migrations run automatically on app startup.
-- The database can insert and retrieve a library root and a book.
-- Add Rust tests for migration and basic CRUD behavior.
+- Initial import uses bounded transactions rather than one commit per database operation.
+- A changed book receives one final search-index refresh during import.
+- An unchanged rescan performs no EPUB parsing, cover extraction, reading derivation, or search-index rewrite.
+- Existing database, scanning, override, and recovery tests continue to pass.
 
-## Phase 3 — Library root selection and scanning
+## Optimization Phase 3 — Incremental search indexing and fast startup
 
-Implement a Tauri command to let the user choose a folder using the native folder picker.
-
-When a root is added:
-1. Save it in library_roots.
-2. Recursively discover files with .epub extension, case-insensitively.
-3. Do not assume that “book folders” have a consistent layout.
-4. Store every EPUB as an individual book.
-5. Record its full file path, filename, parent folder path, file size, and modification time.
-6. Skip files that have not changed since their previous scan.
-7. Do not read entire EPUB files into memory unnecessarily.
-8. Report scan progress to the frontend via Tauri events:
-   - scan started
-   - current path or count
-   - scan completed
-   - scan failed
-9. Allow cancellation.
-10. Do not scan hidden/system directories when reasonably identifiable.
-
-Add a “Library Roots” settings screen with:
-- add root
-- rescan root
-- remove root from the catalog only
-- last scan time
-- number of discovered books
+1. Remove the unconditional full search-index rebuild from normal database startup.
+2. Track the derived-index schema/version and rebuild only after a relevant migration, explicit maintenance action, or detected corruption/incompleteness.
+3. Update search documents transactionally when discovered metadata, overrides, readings, aliases, filenames, paths, or tags change.
+4. Cache or reuse the Japanese tokenizer where supported; do not repeatedly initialize dictionaries per field or per book.
+5. Avoid morphological analysis for empty values and use the deterministic kana path where analysis is unnecessary.
+6. Provide a cancellable, progress-reporting manual index rebuild.
 
 Acceptance criteria:
-- A test fixture with nested Japanese folders and multiple EPUBs is discovered correctly.
-- Rescanning does not create duplicate book rows.
-- Removing a root removes catalog records but never touches source files.
+- Opening an unchanged large catalog does not rewrite search tables or run reading derivation for every book.
+- Incremental updates remain searchable immediately after commit.
+- A forced rebuild produces results equivalent to a clean index.
+- Startup and rebuild timings are covered by benchmarks.
 
-## Phase 4 — EPUB metadata and cover extraction
+## Optimization Phase 4 — Pipelined background importing
 
-For each new or changed EPUB:
-1. Open it as a ZIP archive.
-2. Locate container.xml.
-3. Find the OPF package document.
-4. Extract, when present:
-   - title
-   - creator/author
-   - language
-   - identifier
-   - series metadata
-   - series index
-5. Locate and extract the cover image where possible.
-6. Save extracted cover thumbnails in the configured, separate cover-cache directory, keyed safely by book ID or content hash. Default to an app-managed cache location, but allow the user to choose an HDD location. Do not store this cache inside a source-library root.
-7. Never write anything into the EPUB itself.
-8. Record extraction errors per book without aborting the scan.
-
-Metadata fallbacks:
-- If title is absent, use filename without extension.
-- If creator is absent, leave it blank.
-- If a series cannot be found, do not invent one from the filename yet.
-
-Use Japanese-safe string handling. Create a search-normalization function that:
-- applies Unicode NFKC normalization
-- normalizes full-width and half-width digits
-- trims repeated whitespace
-- preserves original display text
-- is only used for matching, never as the displayed title unless explicitly requested
+1. Separate scanning into stages:
+   - fast filesystem enumeration and change detection
+   - bounded parallel EPUB metadata/cover extraction
+   - serialized batched database/index writes
+2. Run imports as background Tauri tasks so the UI remains responsive and the initiating command does not block until the whole library is complete.
+3. Use a bounded worker count suitable for HDD-backed libraries; make it configurable or choose it conservatively from measured results.
+4. Apply backpressure with bounded queues so a very large library cannot cause unbounded memory growth.
+5. Preserve cancellation across all stages and commit already completed batches safely.
+6. Emit throttled progress with distinct discovery, extraction, and indexing states.
+7. Prevent concurrent scans of the same root and define safe behavior for scans of different roots.
 
 Acceptance criteria:
-- The app extracts title and cover from common EPUB 2 and EPUB 3 fixtures.
-- A malformed EPUB is shown as a catalog item with an understandable error state.
-- Source EPUBs remain byte-for-byte unchanged.
+- Newly discovered books begin appearing before the complete import finishes.
+- Browsing and cancellation remain responsive during a large import.
+- Extraction concurrency improves throughput without uncontrolled disk seeking or SQLite contention.
+- Cancelling leaves the catalog consistent and never marks unseen files unavailable from a partial scan.
 
-## Phase 5 — Browsing interface
+## Optimization Phase 5 — Cover-cache efficiency
 
-Create the primary library screen.
-
-Sidebar:
-- All Books
-- Library Roots
-- Recently Added
-- Untitled / metadata needs attention
-- Tags
-- Collections
-- Settings
-
-Main view:
-- cover grid as the default
-- compact list view toggle
-- each book card shows cover, effective title, effective author, series, and volume when available
-- placeholder cover for missing images
-- virtualized rendering for large result sets
-- sort by title, author, series, date added, file modified date, and folder
-- filter by library root, tag, collection, and “needs metadata”
-
-Define “effective” metadata as:
-- override value when it exists
-- otherwise discovered EPUB metadata
-- otherwise a safe fallback such as the filename
+1. Decode extracted cover images and generate actual bounded thumbnails instead of copying arbitrary original cover bytes unchanged.
+2. Choose and document thumbnail dimensions, quality, color handling, and output format based on measured size and decode performance.
+3. Avoid rewriting an existing valid thumbnail when the source book and extraction inputs are unchanged.
+4. Write cache files atomically through a temporary file in the cache directory, then rename them into place.
+5. Keep cover work bounded and outside every source-library root.
+6. Treat decode failures as per-book extraction errors without blocking metadata import.
 
 Acceptance criteria:
-- The UI remains usable with at least 10,000 catalog records.
-- Missing metadata or covers never crash the grid.
-- Japanese text displays correctly.
+- Cached covers have bounded dimensions and substantially lower typical disk usage than source images.
+- Interrupted writes cannot leave a valid-looking partial thumbnail.
+- Regeneration and cleanup remain safe because covers are fully regenerable.
+- Source EPUBs and source directories remain byte-for-byte unchanged.
 
-## Phase 6 — Search and Japanese-friendly matching
+## Optimization Phase 6 — Large-library query and UI tuning
 
-Implement instant catalog search over:
-- effective title
-- discovered title
-- effective author
-- discovered creator
-- effective series
-- filename
-- parent folder path
-- tags
-
-Requirements:
-1. Search original and NFKC-normalized forms.
-2. Support substring matching suitable for Japanese titles.
-3. Make matching case-insensitive where meaningful.
-4. Rank exact title matches above filename and path matches.
-5. Debounce input.
-6. Keep search local and private.
-7. Do not implement full book-content indexing yet.
-
-Use SQLite FTS5 with a trigram tokenizer if supported by the selected SQLite integration. If it is not available, use indexed normalized columns plus a carefully designed fallback search approach. Document the choice in the README.
+1. Profile browse, filter, sort, and Japanese/romaji substring search against at least 10,000 and preferably 100,000 generated catalog rows.
+2. Use query plans to verify useful indexes and remove redundant indexes only after measurement.
+3. Ensure pagination or virtualization does not trigger unnecessary full-result materialization.
+4. Debounce searches and cancel or ignore stale frontend requests.
+5. Avoid unnecessary full library reloads after progress events or small catalog changes.
+6. Keep cover loading lazy and bounded; placeholders must remain cheap.
 
 Acceptance criteria:
-- A query using `1巻` can locate a title stored as `１巻`, and vice versa.
-- Searching a Japanese substring returns relevant books.
-- Search results return quickly on a large catalog fixture.
+- Common browse and search interactions remain responsive on the large fixture.
+- Stale searches cannot overwrite newer results.
+- Import progress does not cause repeated expensive full-view refreshes.
+- Query-plan and timing evidence is documented for important catalog operations.
 
-## Phase 7 — Romaji and Japanese-reading search
+## Optimization Phase 7 — Validation and release hardening
 
-Extend the local catalog search so romaji queries can find Japanese metadata, including kanji where a reading can be derived. This is an assistive search index, not canonical metadata.
-
-Requirements:
-1. Keep all processing offline and bundled with the desktop application; do not send titles, paths, or EPUB contents to any network service.
-2. Add migration-backed, regenerable derived search fields for kana readings and normalized romaji forms of searchable metadata (effective title, author, series, filename, and aliases where applicable). Keep original display strings unchanged.
-3. Use a Rust-compatible Japanese morphological analyzer and dictionary to derive readings from kanji where practical. Prefer a maintained, distributable Rust implementation with an embedded or app-bundled dictionary; evaluate the resulting binary size, Windows packaging, license, and scan/indexing performance before committing to a library.
-4. Convert derived kana readings and romaji queries using one consistent, documented romanization scheme. Normalize case, Unicode width, whitespace, and common romaji input variants before matching.
-5. For kana-only source text, generate romaji deterministically without morphological analysis. For kanji and mixed text, use best-effort morphological readings. Never invent or display a reading as authoritative metadata.
-6. Index derived fields locally and update them when discovered metadata or user overrides change. A failure to derive a reading must not block cataloging, rescanning, or ordinary Japanese search.
-7. Search both Japanese text and derived reading/romaji fields. Rank exact Japanese-title matches first, then exact/prefix reading matches, then broader romaji, filename, and path matches.
-8. Add editable per-book reading and search-alias overrides. These overrides take precedence over derived readings, persist across rescans, and allow correction of names, unusual kanji readings, and stylized titles.
-9. Clearly label generated readings versus user-provided reading/alias overrides in the book details editor. Resetting an override restores the generated reading, not a guessed canonical value.
-
-Document the selected analyzer/dictionary, its licensing and distribution approach, romanization behavior, known limitations (especially ambiguous or unusual kanji readings), and search-index rebuild behavior in the README.
-
-Acceptance criteria:
-- A romaji query such as `shingeki no kyojin` can locate `進撃の巨人` when the bundled analyzer derives that reading.
-- A romaji query can locate kana-only and mixed kana/kanji titles without network access.
-- A user-supplied reading or alias corrects a deliberately unusual title and survives rescans and app restarts.
-- Failure or ambiguity in analysis never changes displayed metadata and never prevents a book from appearing in search by its original Japanese text.
-- Automated tests cover kana conversion, representative kanji reading derivation, input normalization, ranking, and override precedence.
-
-## Phase 8 — Book details and manual correction
-
-Add a book detail panel or page with:
-- large cover
-- effective metadata
-- raw discovered metadata
-- source path
-- parent folder
-- file information
-- tags
-- extraction status/errors
-- “Open folder”
-- “Read book”
-
-Add editable overrides for:
-- title
-- author
-- series name
-- volume label
-- cover replacement
-- tags
-- notes
-
-Clearly distinguish:
-- EPUB-discovered data
-- user overrides
-- filename/path fallback data
-
-Provide:
-- reset one override to discovered metadata
-- reset all overrides for one book
-- batch tagging for selected books
-
-Acceptance criteria:
-- A title correction survives rescans.
-- Resetting an override restores the correct discovered/fallback value.
-- No edit writes into the original EPUB.
-
-## Phase 9 — Folder-based grouping and series assistance
-
-Do not automatically treat folders as canonical series names. Instead, add optional suggestions.
-
-For books sharing the same parent folder:
-- show a “Folder group” section in the details view
-- allow the user to create a collection or assign a series from selected books
-- suggest likely volume order from:
-  1. EPUB series index
-  2. visible volume patterns in title/filename
-  3. natural sort of filenames
-
-Implement volume-pattern detection for common forms, including:
-- 1巻 / ２巻
-- Vol. 1
-- 第1巻
-- bare numeric suffixes
-- ranges such as 1-2
-
-Treat detected values as suggestions only. Never silently change user metadata.
-
-Acceptance criteria:
-- A folder holding `１巻` and `２巻` can be selected and assigned to one series manually.
-- Suggestions do not overwrite overrides.
-- Natural sorting handles full-width Japanese numerals and ASCII numerals sensibly.
-
-## Phase 10 — Embedded reader
-
-Implement a reader view using epub.js.
-
-Requirements:
-- Open an EPUB selected from the local catalog.
-- Support next/previous page.
-- Remember reading location locally per book.
-- Support font-size controls and light/dark themes.
-- Provide a clear fallback error if a DRM-protected or malformed EPUB cannot be opened.
-- Keep the reader isolated from catalog scanning.
-
-Acceptance criteria:
-- A normal EPUB opens from the details page.
-- Closing and reopening restores the previous reading position.
-- The reader does not require uploading the book anywhere.
-
-## Phase 11 — Reader pop-up dictionary
-
-Add an offline pop-up dictionary to the embedded reader for quick Japanese lookups. This is a personal-use feature: optimize for the owner's local workflow rather than multi-user setup or cloud synchronization.
-
-Requirements:
-1. Allow a user to hover with a configurable modifier key and click/keyboard-select Japanese text in the epub.js reader to open a dictionary pop-up.
-2. Select sensible Japanese word boundaries, including inflected forms, using a bundled offline tokenizer where practical. Always allow the user to adjust the selected text before looking it up.
-3. Show the matched term, reading, definitions, and part of speech. Where installed dictionary data provides them, show pitch, frequency, and kanji details.
-4. Keep dictionary data local. Do not send selected text, EPUB contents, titles, paths, or lookup history to a network service.
-5. Support importing and enabling/disabling personal dictionary archives in a documented format. Prefer compatibility with Yomitan-format dictionaries when practical; do not assume an imported dictionary's metadata is canonical book metadata.
-6. Store dictionary configuration and imported index data in app-managed storage, separate from source-library roots and the cover cache. Never write into an EPUB or its source directory.
-7. Make lookups non-blocking: an unavailable dictionary, malformed entry, or tokenizer failure must leave the reader usable and fall back to a plain-text lookup where possible.
-8. Provide reader settings for enabling the pop-up, trigger behavior, pop-up size, and active dictionaries.
-
-Acceptance criteria:
-- Hovering or selecting a common Japanese word shows a local definition without a network request.
-- A user-imported dictionary remains available after an app restart.
-- The reader remains responsive while looking up text and can still open malformed or unsupported dictionary data with a clear error.
-- Source EPUBs and source-library directories remain unchanged.
-
-## Phase 12 — Reliability, performance, and polish
-
-1. Add structured logging for scan/extraction failures.
-2. Add a recovery path for missing files:
-   - mark unavailable
-   - do not delete metadata automatically
-   - allow a rescan to restore it if the path returns
-3. Add database backup/export and import:
-   - export catalog metadata and overrides
-   - never export source EPUBs unless a future feature explicitly adds that
-   - keep the cover cache separate and regenerable; document that it is not required for catalog backup
-4. Add an onboarding flow:
-   - explain that the app reads the selected folders
-   - explicitly state it does not alter book files
-5. Add a README covering:
-   - setup
-   - architecture
-   - privacy model
-   - database location
-   - rescanning behavior
-   - Japanese normalization/search behavior
-   - cover-cache location, its separation from source libraries, and safe regeneration/cleanup behavior
-6. Build a Windows release artifact.
+1. Compare all performance measurements with the Phase 1 baseline and document the results in the README.
+2. Add regression tests for transaction rollback, cancellation, incremental indexing, unavailable files, duplicate prevention, and cache-write interruption.
+3. Test initial import and unchanged rescan using both SSD-like and HDD-friendly concurrency settings where practical.
+4. Verify database backup/import compatibility before any migration that changes persistent catalog data.
+5. Verify Windows release builds and offline operation.
+6. Confirm that no optimization writes to, renames, moves, uploads, or deletes source EPUBs or source directories.
 
 Final acceptance criteria:
-- The application works fully offline.
-- It never modifies source EPUBs or source directories.
-- It can scan deeply nested Japanese folder structures.
-- It remains responsive with a very large library.
-- Manual corrections persist across rescans and app restarts.
-- The project has automated tests for the database, scanning, normalization, metadata fallback, romaji/reading search, and volume-detection logic.
+- Initial import throughput is materially improved over the recorded baseline.
+- An unchanged rescan is dominated by filesystem enumeration and performs no redundant extraction or indexing.
+- Application startup time no longer scales with a full search-index rebuild.
+- The UI remains responsive throughout import, search, cancellation, and cover loading.
+- Manual corrections and all existing catalog behavior survive optimization unchanged.
 
 Important implementation rules:
 - Prefer small, reviewable commits or checkpoints.
