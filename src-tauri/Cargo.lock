@@ -4397,18 +4397,30 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "image",
- "lindera",
  "quick-xml 0.37.5",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tempfile",
+ "tmw-japanese-core",
  "unicode-normalization",
+ "uuid",
  "zip",
+]
+
+[[package]]
+name = "tmw-japanese-core"
+version = "0.1.0"
+dependencies = [
+ "lindera",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]

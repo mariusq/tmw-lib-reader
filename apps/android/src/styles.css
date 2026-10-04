@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  font-family: system-ui, sans-serif;
+  color: #f1f5f9;
+  background: #0f172a;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+.reader-host {
+  height: 58vh;
+  background: white;
+  color: black;
+}
+.control {
+  min-height: 48px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #334155;
+  color: white;
+}
+.lookup {
+  background: #0f172a;
+  color: white;
+  width: 90vw;
+  max-height: 70vh;
+  border: 1px solid #64748b;
+  border-radius: 12px;
+}
+.lookup::backdrop {
+  background: #0008;
+}
+.reader-host {
+  height: 52dvh;
+}
+.lookup {
+  margin: auto;
+  padding: 16px;
+  max-height: 70dvh;
+}
+body {
+  padding-top: max(24px, env(safe-area-inset-top));
+}
+.reader-host {
+  height: 48dvh;
+}

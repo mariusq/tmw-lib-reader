@@ -10,6 +10,28 @@ const available = { ...recent, id: 1, title: "Available", isAvailable: true };
 
 beforeEach(() => { vi.mocked(invoke).mockReset(); });
 describe("ContinueReading", () => {
+  it("removes a recent book and refreshes the primary candidate", async () => {
+    let removed = false;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "remove_resume_book") { removed = true; return; }
+      return removed ? [] : [available];
+    });
+    render(<ContinueReading language="en" onLibrary={vi.fn()} onRoots={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove from recently read: Available" }));
+    await screen.findByText("Open a book from your library and it will appear here next time.");
+    expect(invoke).toHaveBeenCalledWith("remove_resume_book", { bookId: 1 });
+    expect(screen.queryByRole("button", { name: "Continue reading: Available" })).not.toBeInTheDocument();
+  });
+  it("keeps the book visible and reports a failed removal", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "remove_resume_book") throw new Error("Database unavailable");
+      return [available];
+    });
+    render(<ContinueReading language="en" onLibrary={vi.fn()} onRoots={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove from recently read: Available" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Database unavailable");
+    expect(screen.getByRole("button", { name: "Resume: Available" })).toBeEnabled();
+  });
   it("resumes the available candidate, retains unavailable books and refreshes only on close", async () => {
     vi.mocked(invoke).mockImplementation(async (_, args) => (args as { availableOnly: boolean }).availableOnly ? [available] : [recent]);
     const roots = vi.fn();

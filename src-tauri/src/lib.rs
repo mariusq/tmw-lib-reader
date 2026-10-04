@@ -1,3 +1,4 @@
+pub mod companion;
 pub mod db;
 pub mod models;
 pub mod services;
@@ -429,6 +430,13 @@ fn get_reader_book(
 }
 
 #[tauri::command]
+fn remove_resume_book(database: State<'_, db::Database>, book_id: i64) -> Result<(), String> {
+    database
+        .remove_resume_book(book_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn list_resume_books(
     database: State<'_, db::Database>,
     available_only: bool,
@@ -786,6 +794,36 @@ fn regenerate_cover_cache(
     Ok(regenerated)
 }
 
+#[tauri::command]
+fn companion_status(service: State<'_, companion::Service>) -> companion::Status {
+    service.status()
+}
+#[tauri::command]
+fn companion_enable(
+    app: tauri::AppHandle,
+    service: State<'_, companion::Service>,
+) -> Result<companion::Status, String> {
+    let root = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    service.enable(
+        root.join("catalog.sqlite3"),
+        root.join("companion-devices.sqlite3"),
+    )
+}
+#[tauri::command]
+fn companion_disable(service: State<'_, companion::Service>) {
+    service.disable();
+}
+#[tauri::command]
+fn companion_pairing_code(service: State<'_, companion::Service>) -> Result<String, String> {
+    service.pairing_code()
+}
+#[tauri::command]
+fn companion_revoke(
+    service: State<'_, companion::Service>,
+    device_id: String,
+) -> Result<(), String> {
+    service.revoke(&device_id)
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -797,10 +835,16 @@ pub fn run() {
             let database_path: PathBuf = app_data.join("catalog.sqlite3");
             app.manage(db::Database::open(&database_path)?);
             app.manage(ScanController::default());
+            app.manage(companion::Service::default());
             app.manage(IndexRebuildController::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            companion_status,
+            companion_enable,
+            companion_disable,
+            companion_pairing_code,
+            companion_revoke,
             choose_library_folder,
             add_library_root,
             list_library_roots,
@@ -836,6 +880,7 @@ pub fn run() {
             delete_passage,
             get_passage_location,
             list_resume_books,
+            remove_resume_book,
             record_reader_open,
             set_reader_finished,
             get_reading_state,

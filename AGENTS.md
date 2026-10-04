@@ -1,5 +1,24 @@
 Build a local-first Windows desktop EPUB-library browser. Do not modify, rename, move, upload, or delete any EPUBs in the user’s source library.
 
+## User-directed testing budget
+
+For future work, testing and validation must consume no more than 50% of total
+task time: at most a 50/50 development-to-testing split, preferably less testing.
+Count test execution, verification-only builds/APK packaging, emulator/manual
+checks, and validation-only waiting toward this budget. Track approximate time
+without double-counting overlapping work; do not pad development to meet the ratio.
+
+Use targeted checks during implementation, then one final relevant regression
+run, build/package pass, and brief smoke test. Reuse existing evidence. Repeat
+checks only for a concrete failure or a subsequent change affecting that check;
+avoid repeated full suites, both-ABI rebuilds, and broad emulator passes for
+unrelated small fixes. Documentation-only edits need a diff/readback check.
+
+Plan required acceptance checks within this budget. If a necessary check would
+exceed it, explain the specific remaining check and request an explicit budget
+exception before expanding validation. Report unverified items honestly; never
+claim skipped checks passed. Source-file safety remains mandatory.
+
 Use:
 - Tauri v2
 - React + TypeScript + Vite

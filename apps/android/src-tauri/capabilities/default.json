@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Android feasibility shell; no source filesystem access",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

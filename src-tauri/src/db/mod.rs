@@ -1,3 +1,4 @@
+pub(crate) mod companion;
 pub mod history;
 mod passages;
 pub mod shelves;
@@ -216,6 +217,12 @@ impl Database {
         if search_schema_changed || !search_index_is_complete(&connection)? {
             rebuild_search_index(&mut connection, None, |_| {})?;
         }
+        // A restore may have the same numeric revision but different history.
+        // Keep public identity, invalidate every pre-restore mobile cursor.
+        connection.execute(
+            "UPDATE companion_revision SET epoch=lower(hex(randomblob(16)))",
+            [],
+        )?;
         Ok(())
     }
 
@@ -390,6 +397,13 @@ impl Database {
         self.set_reading_status(id, if finished { "finished" } else { "reading" })
     }
 
+    /// Remove only recent-list membership; the saved CFI and reading status survive.
+    pub fn remove_resume_book(&self, id: i64) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        connection.execute("DELETE FROM reader_resume WHERE book_id=?1", [id])?;
+        Ok(())
+    }
+
     /// Bounded indexed queries, including a separate primary resume candidate.
     pub fn resume_books(&self, available_only: bool) -> rusqlite::Result<Vec<ResumeBook>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
@@ -498,9 +512,10 @@ impl Database {
         if query.is_empty() {
             return Ok(vec![]);
         }
-        let mut statement = connection.prepare("SELECT e.id,e.term,e.reading,e.definitions,e.part_of_speech,d.name FROM dictionary_entries e JOIN dictionaries d ON d.id=e.dictionary_id WHERE d.enabled=1 AND (e.term_normalized=?1 OR e.reading_normalized=?1 OR e.term_normalized LIKE ?1 || '%') ORDER BY CASE WHEN e.term_normalized=?1 THEN 0 WHEN e.reading_normalized=?1 THEN 1 ELSE 2 END, length(e.term) LIMIT 12")?;
+        let sql = format!("SELECT e.id,e.term,e.reading,e.definitions,e.part_of_speech,d.name FROM dictionary_entries e JOIN dictionaries d ON d.id=e.dictionary_id WHERE d.enabled=1 AND {}", tmw_japanese_core::dictionary::LOOKUP_PREDICATE);
+        let mut statement = connection.prepare(&sql)?;
         let result = statement
-            .query_map([query], |row| {
+            .query_map(params![query, format!("{query}%")], |row| {
                 Ok(DictionaryEntry {
                     id: row.get(0)?,
                     term: row.get(1)?,
@@ -1006,6 +1021,41 @@ fn run_migrations(connection: &mut Connection) -> rusqlite::Result<bool> {
         transaction.pragma_update(None, "user_version", 14)?;
         transaction.commit()?;
     }
+    if version < 15 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/015_companion_identity.sql"))?;
+        transaction.pragma_update(None, "user_version", 15)?;
+        transaction.commit()?;
+    }
+    if version < 16 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/016_companion_revisions.sql"))?;
+        // Metadata and membership changes invalidate cursors in the same transaction.
+        for (table, key) in [
+            ("books", "id"),
+            ("book_overrides", "book_id"),
+            ("book_reading_overrides", "book_id"),
+            ("book_tags", "book_id"),
+            ("collection_books", "book_id"),
+            ("book_search_documents", "book_id"),
+        ] {
+            for (operation, row) in [("INSERT", "new"), ("UPDATE", "new"), ("DELETE", "old")] {
+                transaction.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS companion_{table}_{operation} AFTER {operation} ON {table} BEGIN
+                  UPDATE companion_revision SET revision=revision+1;
+                  INSERT INTO companion_changes SELECT public_id,(SELECT revision FROM companion_revision) FROM companion_books WHERE book_id={row}.{key} ON CONFLICT(public_id) DO UPDATE SET revision=excluded.revision; END;"))?;
+            }
+        }
+        for (table, membership, key) in [
+            ("tags", "book_tags", "tag_id"),
+            ("collections", "collection_books", "collection_id"),
+        ] {
+            transaction.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS companion_{table}_rename AFTER UPDATE ON {table} BEGIN
+                UPDATE companion_revision SET revision=revision+1;
+                INSERT INTO companion_changes SELECT c.public_id,(SELECT revision FROM companion_revision) FROM companion_books c JOIN {membership} m ON m.book_id=c.book_id WHERE m.{key}=new.id ON CONFLICT(public_id) DO UPDATE SET revision=excluded.revision; END;"))?;
+        }
+        transaction.pragma_update(None, "user_version", 16)?;
+        transaction.commit()?;
+    }
     Ok(version < 8)
 }
 
@@ -1447,7 +1497,7 @@ mod tests {
         let foreign_keys: i64 = connection
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 16);
         assert_eq!(foreign_keys, 1);
         assert!(connection
             .query_row(
@@ -1533,6 +1583,30 @@ mod tests {
         assert!(!database.resume_books(false).unwrap()[0].is_available);
         assert!(database.resume_books(true).unwrap().is_empty());
         assert!(database.reading_location(book.id).unwrap().is_some());
+        let location = database.reading_location(book.id).unwrap();
+        database.remove_resume_book(book.id).unwrap();
+        database.remove_resume_book(book.id).unwrap();
+        assert!(database.resume_books(false).unwrap().is_empty());
+        assert!(database.resume_books(true).unwrap().is_empty());
+        assert_eq!(database.reading_location(book.id).unwrap(), location);
+        let status: String = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT reading_status FROM books WHERE id=?1",
+                [book.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "reading");
+        drop(database);
+        let database = Database::open(&path).unwrap();
+        assert!(database.resume_books(false).unwrap().is_empty());
+        assert_eq!(database.reading_location(book.id).unwrap(), location);
+        database.record_reader_open(book.id).unwrap();
+        assert_eq!(database.resume_books(false).unwrap()[0].id, book.id);
+        assert_eq!(database.reading_location(book.id).unwrap(), location);
         assert!(!directory.path().join("missing-source").exists());
     }
 

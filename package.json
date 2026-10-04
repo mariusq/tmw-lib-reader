@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "workspaces": ["apps/android"],
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -11,7 +12,11 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "cargo tauri"
+    "tauri": "cargo tauri",
+    "android:check": "powershell -NoProfile -File apps/android/Android.ps1 -Action Check",
+    "android:build": "powershell -NoProfile -File apps/android/Android.ps1 -Action Build",
+    "android:dev": "powershell -NoProfile -File apps/android/Android.ps1 -Action Dev",
+    "android:frontend": "npm run build --workspace tmw-android"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.0",

@@ -1,3 +1,4 @@
+import { caretAt } from "../../../packages/reader-core/caret";
 import { ReadingStatus } from "../../components/ReadingStatus";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import ePub, { type Book, type Rendition } from "epubjs";
@@ -667,7 +668,7 @@ function attachDictionaryHandlers(
     document.documentElement.dataset.tmwDictionaryBound = "true";
     document.addEventListener("click", (event) => {
       if (!(modifier === "alt" ? event.altKey : event.ctrlKey)) return;
-      const point = caretAt(document, event.clientX, event.clientY);
+      const point = caretAt(document, event.clientX, event.clientY, false);
       if (!point) return;
       const block = (point.node.parentElement?.closest("p,div,li,td,h1,h2,h3") ?? point.node.parentElement);
       const target = block ? dictionaryTextAt(block, point.node, point.offset) : null;
@@ -681,14 +682,6 @@ function attachDictionaryHandlers(
       }
     }, true);
   }
-}
-
-function caretAt(document: Document, x: number, y: number): { node: Text; offset: number } | null {
-  const legacy = document.caretRangeFromPoint?.(x, y);
-  if (legacy?.startContainer.nodeType === Node.TEXT_NODE) return { node: legacy.startContainer as Text, offset: legacy.startOffset };
-  const modern = document.caretPositionFromPoint?.(x, y);
-  if (modern?.offsetNode.nodeType === Node.TEXT_NODE) return { node: modern.offsetNode as Text, offset: modern.offset };
-  return null;
 }
 
 function handleReaderKey(

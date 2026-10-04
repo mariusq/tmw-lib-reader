@@ -11,7 +11,20 @@ export function ContinueReading({ language, onLibrary, onRoots }: { language: "j
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<number | null>(null);
   const ja = language === "ja";
+  async function removeBook(id: number) {
+    setRemoving(id);
+    try {
+      await invoke("remove_resume_book", { bookId: id });
+      setError(null);
+      setRevision(value => value + 1);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setRemoving(null);
+    }
+  }
   useEffect(() => {
     let disposed = false;
     Promise.all([
@@ -35,13 +48,16 @@ export function ContinueReading({ language, onLibrary, onRoots }: { language: "j
     {loading ? <p role="status">{ja ? "読み込み中…" : "Loading…"}</p> : books.length === 0 ?
       <div className="rounded-xl border border-dashed border-white/15 p-8 text-stone-400"><p>{ja ? "ライブラリから本を開くと、ここから再開できます。" : "Open a book from your library and it will appear here next time."}</p><button className="mt-4 text-amber-300 underline" onClick={onRoots}>{ja ? "ライブラリフォルダーを追加" : "Add a library folder"}</button></div> :
       <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-        {books.map(book => <article key={book.id} className="min-w-0">
+        {books.map(book => <article key={book.id} className="group relative min-w-0">
           <button disabled={!book.isAvailable} className="w-full text-left disabled:opacity-50" onClick={() => setReaderId(book.id)} aria-label={`${ja ? "続きを読む" : "Resume"}: ${book.title}`}>
             <ResumeCover path={book.coverPath} />
             <h2 className="mt-3 truncate font-medium" title={book.title}>{book.title}</h2>
             <p className="truncate text-sm text-stone-400">{book.creator}</p>
             <p className="mt-2 text-xs text-stone-400">{new Intl.DateTimeFormat(ja ? "ja-JP" : "en", { dateStyle: "medium", timeStyle: "short" }).format(book.lastReadAt * 1000)}</p>
             <p className="mt-1 text-xs text-amber-200">{book.hasLocation ? (ja ? "読書位置を保存済み" : "Saved reading position") : (ja ? "読書位置なし · 最初から開く" : "No saved position · opens at the beginning")}</p>
+          </button>
+          <button disabled={removing !== null} className="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-lg border border-white/25 bg-stone-950/45 text-white shadow-[0_2px_8px_rgba(0,0,0,0.15)] backdrop-blur-md transition-[opacity,background-color,border-color] duration-150 hover:border-white/50 hover:bg-stone-950/75 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-wait disabled:opacity-40 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100" title={ja ? "最近読んだ本から削除（読書位置は保持されます）" : "Remove from recently read (saved position is kept)"} aria-label={`${ja ? "最近読んだ本から削除" : "Remove from recently read"}: ${book.title}`} onClick={() => void removeBook(book.id)}>
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="m6 6 12 12M18 6 6 18" /></svg>
           </button>
           {!book.isAvailable && <div className="mt-2 text-xs text-red-200"><p>{ja ? "ソースが見つかりません。フォルダーを接続して再スキャンしてください。" : "Source unavailable. Reconnect its folder and rescan."}</p><button className="mt-2 underline" onClick={onRoots}>{ja ? "ライブラリルート" : "Library roots"}</button></div>}
         </article>)}

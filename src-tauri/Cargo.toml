@@ -26,10 +26,13 @@ quick-xml = "0.37.2"
 unicode-normalization = "0.1.24"
 zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
 # Lindera embeds IPADIC into the Windows binary so reading derivation stays offline.
-lindera = { version = "5.0.0", features = ["embed-ipadic"] }
+tmw-japanese-core = { path = "../crates/japanese-core" }
 serde_json = "1"
 crossbeam-channel = "0.5"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.14.0"

@@ -2,6 +2,14 @@
 
 This is a local-first Tauri desktop catalog. EPUB source folders are read-only: scanning and search never modify EPUBs or source directories.
 
+The Android companion lives in `apps/android/` with independent Tauri configuration
+and build outputs. Windows stays in the existing root `src/` and `src-tauri/`.
+Both use the portable Japanese Rust implementation in `crates/japanese-core/`.
+See [Android feasibility and build instructions](docs/android/feasibility.md)
+and [Android implementation stages](AndroidAgents.md). Run `npm run android:check`
+to inspect Android prerequisites, or
+`./apps/android/Android.ps1 -Action Build -TestSigning` for local feasibility APKs.
+
 ## Setup and Windows build
 
 Requirements are Node.js/npm, the stable Rust toolchain, and the Windows prerequisites for Tauri v2 (WebView2 and Microsoft C++ Build Tools). From the repository root:
@@ -215,6 +223,8 @@ Validation covers fallback counting, manual-query isolation, stale searches, anc
 
 ## Continue Reading home screen
 
+Use “Remove from recently read” beneath a book to remove it from Continue Reading while keeping its saved position and reading status. Opening the book from the library again restores its position and adds it back to the recent list.
+
 The app opens to Continue Reading (Japanese/English), with up to twelve recently opened unfinished books and a primary action for the most recent available one. Opens restore the existing EPUB CFI. Recency is recorded only after successful display, with book ID as a deterministic tie-breaker for opens in the same second. Opening details does not change it. Covers are lazy, and home does not issue full-library browse requests or refresh on scan progress. Revisit home after a rescan to refresh availability.
 
 Unavailable books retain their saved position and link to Library Roots for reconnection/rescanning. Books with no saved anchor clearly open at the beginning. Home shows saved-position information instead of an unreliable percentage, including for fixed-layout EPUBs. A reader toolbar action explicitly marks a book finished or unfinished. Completion hides it from home; reopening it through the full library preserves completion. Visiting the last page never marks completion automatically.
@@ -243,3 +253,20 @@ Generated smart-shelf benchmark (Windows debug build, 20 queries each; fixtures 
 | 100,000 | 34.743 ms | 47.026 ms | 0.770 ms |
 
 A query-plan assertion verifies `idx_books_reading_status`; the status equality predicate is selected only when filtering so SQLite can use that index. Japanese two-character search uses the existing normalized fallback, while romaji uses trigram FTS. Reproduce with `cargo test --manifest-path src-tauri/Cargo.toml --lib smart_shelf_large_catalog_benchmark -- --ignored --nocapture`.
+
+Android Phase 2 adds a manually supplied offline EPUB reader and bundled indexed
+JMdict lookup. Physical-phone functional verification passed; Japanese formatting
+and UI polish remain outstanding. See [Phase 2 evidence](docs/android/phase2.md)
+and [current Android scope and handoff](AndroidAgents.md).
+The Windows app remains in its existing layout.
+
+Android Phase 3 is complete: the user verified private HTTPS pairing/connection
+and rejection after device revocation on the physical phone. See
+[Phase 3 evidence and private Tailscale Serve setup](docs/android/phase3.md).
+The desktop service starts disabled; private Serve access requires the PC awake.
+Public Tailscale Funnel is outside scope.
+
+The next implementation is [Phase 4: catalog, downloads and mobile storage](docs/android/phase4-handoff.md).
+That handoff includes the next-agent prompt and remaining snapshot/delta,
+identity, content-version and cover-cache decisions. Phase 4 has not started;
+user-data sync remains Phase 5, and reader/Japanese formatting polish Phase 6.

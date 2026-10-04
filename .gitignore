@@ -5,6 +5,19 @@ coverage/
 *.tsbuildinfo
 src-tauri/target/
 src-tauri/gen/
+apps/android/src-tauri/target/
+apps/android/src-tauri/gen/schemas/
+apps/android/.test-results/
+apps/android/src-tauri/gen/android/.gradle/
+apps/android/src-tauri/gen/android/build/
+apps/android/src-tauri/gen/android/app/build/
+apps/android/src-tauri/gen/android/.tauri/
+apps/android/src-tauri/gen/android/local.properties
+crates/*/target/
+*.apk
+*.aab
+*.jks
+*.keystore
 
 # Local EPUB fixtures and catalog data
 testLibrary/
@@ -31,3 +44,14 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Local Android emulator launchers
+/Launch-Android.ps1
+/Launch-Android.cmd
+apps/android/src-tauri/assets/*.sqlite3.gz
+apps/android/src-tauri/assets/*.tmp
+
+/.test-results/
+
+# Generated Android dependency notices. TODO: add dev/build generation hooks for fresh checkouts.
+/apps/android/src/notices.txt

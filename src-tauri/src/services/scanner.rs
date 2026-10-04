@@ -19,6 +19,21 @@ use crate::{
     services::{metadata, performance},
 };
 
+trait ScanEmitter: Sync {
+    fn scan_emit<S: Serialize + Clone>(&self, event: &str, payload: S);
+}
+impl ScanEmitter for AppHandle {
+    fn scan_emit<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        let _ = Emitter::emit(self, event, payload);
+    }
+}
+#[cfg(test)]
+struct SilentEvents;
+#[cfg(test)]
+impl ScanEmitter for SilentEvents {
+    fn scan_emit<S: Serialize + Clone>(&self, _event: &str, _payload: S) {}
+}
+
 const SCAN_BATCH_SIZE: usize = 128;
 const METADATA_BATCH_SIZE: usize = 32;
 const DEFAULT_EXTRACTION_WORKERS: usize = 2;
@@ -165,7 +180,7 @@ pub fn start_scan(
         .unwrap_or(DEFAULT_EXTRACTION_WORKERS)
         .clamp(1, MAX_EXTRACTION_WORKERS);
     let cancellation = app.state::<ScanController>().start(&scan_id, root_id)?;
-    let _ = app.emit(
+    let _ = app.scan_emit(
         "scan-started",
         ScanStarted {
             scan_id: scan_id.clone(),
@@ -310,7 +325,7 @@ fn run_scan(
                     ),
                 ],
             );
-            let _ = app.emit(
+            let _ = app.scan_emit(
                 "scan-completed",
                 ScanCompleted {
                     scan_id,
@@ -329,7 +344,7 @@ fn run_scan(
                 "scan_failed",
                 &[("root_id", root_id.to_string()), ("error", message.clone())],
             );
-            let _ = app.emit(
+            let _ = app.scan_emit(
                 "scan-failed",
                 ScanFailed {
                     scan_id,
@@ -343,7 +358,7 @@ fn run_scan(
 
 #[allow(clippy::too_many_arguments)]
 fn run_pipeline(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     database: &Database,
     root_id: i64,
     root: &Path,
@@ -417,7 +432,7 @@ fn run_pipeline(
 }
 
 fn discover_files(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     root_id: i64,
     root: &Path,
     scan_id: &str,
@@ -560,7 +575,7 @@ fn detect_changes(
 }
 
 fn extract_metadata(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     root_id: i64,
     scan_id: &str,
     cover_cache_directory: &Path,
@@ -624,7 +639,7 @@ fn extract_metadata(
 }
 
 fn write_metadata_batches(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     database: &Database,
     root_id: i64,
     scan_id: &str,
@@ -655,7 +670,7 @@ fn write_metadata_batches(
 }
 
 fn write_metadata_batch(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     database: &Database,
     root_id: i64,
     scan_id: &str,
@@ -682,20 +697,20 @@ fn write_metadata_batch(
         .map(|item| item.file_path.clone())
         .unwrap_or_default();
     emit_progress(app, scan_id, root_id, "indexing", progress, current_path);
-    let _ = app.emit("scan-catalog-updated", scan_id);
+    let _ = app.scan_emit("scan-catalog-updated", scan_id);
     batch.clear();
     Ok(())
 }
 
 fn emit_progress(
-    app: &AppHandle,
+    app: &impl ScanEmitter,
     scan_id: &str,
     root_id: i64,
     stage: &'static str,
     progress: &PipelineProgress,
     current_path: String,
 ) {
-    let _ = app.emit(
+    let _ = app.scan_emit(
         "scan-progress",
         ScanProgress {
             scan_id: scan_id.to_owned(),
@@ -771,4 +786,31 @@ mod tests {
         assert!(is_epub(Path::new("日本語.EPUB")));
         assert!(!is_epub(Path::new("cover.jpg")));
     }
+}
+
+/// Exercises the production pipeline with a silent event sink; no real app data.
+#[cfg(test)]
+pub(crate) fn test_import(
+    database: &Database,
+    root_id: i64,
+    root: &Path,
+    cache: &Path,
+) -> Result<(), String> {
+    let app = SilentEvents;
+    database.begin_scan(root_id).map_err(|e| e.to_string())?;
+    run_pipeline(
+        &app,
+        database,
+        root_id,
+        root,
+        cache,
+        "api-test",
+        2,
+        &AtomicBool::new(false),
+        &Arc::new(PipelineProgress::default()),
+    )?;
+    database
+        .reconcile_completed_scan(root_id)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

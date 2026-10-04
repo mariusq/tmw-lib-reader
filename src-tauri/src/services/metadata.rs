@@ -8,7 +8,7 @@ use std::{
 
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbImage};
 use quick_xml::{events::Event, Reader};
-use unicode_normalization::UnicodeNormalization;
+
 use zip::ZipArchive;
 
 use crate::models::book::ExtractedBookMetadata;
@@ -23,12 +23,7 @@ struct XmlElement {
 
 /// A matching-only normalization; callers must retain the original strings for display.
 pub fn normalize_for_search(value: &str) -> String {
-    value
-        .nfkc()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    tmw_japanese_core::dictionary::normalize_query(value)
 }
 
 pub fn extract_epub(path: &Path, book_id: i64, cache_directory: &Path) -> ExtractedBookMetadata {
