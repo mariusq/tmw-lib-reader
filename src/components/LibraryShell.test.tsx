@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue([]) }));
@@ -40,4 +40,39 @@ describe("LibraryShell", () => {
     vi.mocked(invoke).mockResolvedValue([]);
   });
 
+  it("groups navigation and keeps settings controls reachable", async () => {
+    localStorage.removeItem("tmw-interface-language");
+    render(<LibraryShell />);
+    const navigation = within(screen.getByRole("navigation", { name: "Main navigation" }));
+    expect(navigation.getAllByRole("button")).toHaveLength(5);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+
+    fireEvent.click(navigation.getByRole("button", { name: "ライブラリ" }));
+    fireEvent.click(screen.getByRole("button", { name: "最近追加" }));
+    expect(screen.getByRole("heading", { name: "最近追加" })).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("browse_books", expect.objectContaining({ request: expect.objectContaining({ sort: "dateAdded" }) }));
+    fireEvent.click(screen.getByRole("button", { name: "要確認のメタデータ" }));
+    expect(screen.getByRole("checkbox", { name: "要確認のみ" })).toBeChecked();
+
+    fireEvent.click(navigation.getByRole("button", { name: "読書ノート" }));
+    expect(await screen.findByRole("heading", { name: /Saved passages/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "調べた言葉" }));
+    expect(await screen.findByRole("heading", { name: /Lookup history/ })).toBeInTheDocument();
+
+    fireEvent.click(navigation.getByRole("button", { name: "コレクション" }));
+    fireEvent.click(screen.getByRole("button", { name: "タグ" }));
+    expect(screen.getByRole("heading", { name: "タグ" })).toBeInTheDocument();
+
+    fireEvent.click(navigation.getByRole("button", { name: "設定" }));
+    fireEvent.click(screen.getByRole("button", { name: "ライブラリルート" }));
+    expect(screen.getByRole("heading", { name: "ライブラリルート" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "フォルダーを追加" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "一般" }));
+    fireEvent.click(screen.getByRole("switch", { name: "言語" }));
+    expect(navigation.getByRole("button", { name: "Reading Notes" })).toBeInTheDocument();
+    expect(localStorage.getItem("tmw-interface-language")).toBe("en");
+    localStorage.removeItem("tmw-interface-language");
+  });
+
 });
+

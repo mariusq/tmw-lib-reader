@@ -201,6 +201,18 @@ Phase 11 bundles the supplied `jmdict-eng-3.6.2.json` [JMdict](https://www.edrdg
 
 In the reader, hold the selected trigger modifier (Alt by default; switchable to Ctrl) while clicking Japanese text. Caret APIs identify the clicked text and bundled Lindera/IPADIC selects the local token and its lemma, so inflections such as `食べました` can be looked up as `食べる`. Lookup tries surface form, lemma, then reading; the query remains editable and a conservative Japanese-run fallback preserves reading controls if tokenization fails. Preferences and the index stay in SQLite app data, with no network calls.
 
+## Lookup history and repeat encounters
+
+Open **Lookup history** from the library sidebar or reader toolbar to search recent lookups and return to source passages, including passages in another book. The dictionary popup shows the retained encounter count after a successful lookup. One intentional click or submitted manual query records one encounter after all surface/lemma/reading fallbacks finish; unsuccessful lookups, tokenization, rerenders, and stale responses do not add encounters. Manual queries have no source anchor and do not reuse the previous clicked sentence.
+
+When all returned senses agree on headword and reading, inflected surface forms aggregate under that Unicode-normalized identity. Different readings remain separate. Ambiguous results are labeled and grouped only by normalized query, separately from identified entries; no guessed headword is saved. History does not create saved passages or learning tasks.
+
+Tracking defaults to on and can be disabled in the history view without deleting existing history. **Clear history** confirms removal of history only; reading progress, completion, saved passages, and source files are preserved. Retention is bounded to the latest 10,000 successful lookups, with counts calculated within that window. Pages contain at most 50 encounters; search is debounced and stale responses are ignored. Anchors are checked against source size and modification time before jumping, and unavailable/changed sources keep their excerpts readable.
+
+Additive migration 13 stores history and its preference in the local SQLite catalog, included in backup/restore. Dictionary rebuilds and library rescans preserve history; no EPUB files are written or uploaded. Restoring an older catalog creates the history table without replacing existing corrections or progress.
+
+Validation covers fallback counting, manual-query isolation, stale searches, anchors, tracking controls, independent clearing, retention, separate readings, rescans/recovery, restart, dictionary rebuild, and backup/restore. Run `cargo test --manifest-path src-tauri/Cargo.toml --lib history_retention_benchmark -- --ignored --nocapture` for the generated fixture benchmark. On this Windows debug build at 10,000 encounters, a recent 50-row page took 18.82 ms, substring search at the last page took 20.42 ms, and recording with retention enforcement took 0.75 ms. The fixture uses one shared identity (the worst case for repeat counts). Query-plan checks confirm the covering identity index is used. These are backend timings, not end-to-end UI latency.
+
 ## Continue Reading home screen
 
 The app opens to Continue Reading (Japanese/English), with up to twelve recently opened unfinished books and a primary action for the most recent available one. Opens restore the existing EPUB CFI. Recency is recorded only after successful display, with book ID as a deterministic tie-breaker for opens in the same second. Opening details does not change it. Covers are lazy, and home does not issue full-library browse requests or refresh on scan progress. Revisit home after a rescan to refresh availability.
@@ -212,3 +224,22 @@ Migration 11 adds a small indexed `reader_resume` table and seeds prior reader p
 Validation: frontend tests cover empty-state routes, selecting the available primary candidate, unavailable cards, and refresh after reader close. Backend regression covers reopen, completion, rescan, restart, backup/restore, and unavailable source preservation. Production frontend build, lint, 16 frontend tests, and 34 backend tests pass (five opt-in benchmarks excluded).
 
 Run the generated-catalog benchmark with `cargo test --manifest-path src-tauri/Cargo.toml --lib resume_large_catalog_benchmark -- --ignored --nocapture`. With 100,000 catalog and resume rows, including twenty unavailable newest entries, 100 pairs of home queries took 10.35 ms total in a Windows debug build (about 0.10 ms per pair). SQLite used the covering `idx_reader_resume_recent` index for the bounded recency selection. This is a database benchmark, not a measured end-to-end UI latency.
+
+### Reading statuses and smart shelves
+
+Books have an explicit Unset, Want to read, Reading, Paused, or Finished status in the local catalog. Change it in book details or the reader. A successful reader display promotes Unset/Want to read to Reading; Paused and Finished survive reopening. Visiting the final page never finishes a book. The existing Mark finished/Mark unfinished buttons use the same status. Paused books leave Continue Reading until their status changes.
+
+Finishing explicitly records a UTC completion timestamp (displayed in local time). Repeating Finished keeps the existing date. Leaving Finished clears it; finishing again records a new date. Existing finished books retain their status with an unknown historical completion date. Migration 14 is additive, preserves previous progress/corrections, and maps existing resume rows to Reading or Finished. Catalog backup/restore includes statuses, completion dates, and smart shelves, and restores older catalogs through migrations.
+
+The library's status buttons provide built-in reading shelves. Combine a status with the existing query, root, tag, collection, metadata, duplicate, and sort controls, then name and save a smart shelf. Selecting it restores those filters. Edit the controls and use Update shelf to replace its definition or rename it; Position sorts shelves numerically (then name). Delete shelf removes only the saved query. Definitions are versioned and validated, never executable SQL. Queries stay dynamic and paginated at 80 rows, with the existing stale-request protection; committed corrections, tags, and statuses affect the next query immediately.
+
+Validation: 41 Rust tests passed (7 optional benchmarks ignored), 31 frontend tests passed, TypeScript and ESLint passed, and Vite production output built with `--configLoader runner` (the default esbuild config loader encounters sandbox parent-directory access restrictions). Regression coverage includes transitions, preserved completion dates, rescans, unavailable books, restart, backup/restore, old-schema migration, invalid filters, shelf editing/deletion, and source safety. No source library or testLibrary files are written by this feature.
+
+Generated smart-shelf benchmark (Windows debug build, 20 queries each; fixtures contain no EPUB files):
+
+| Catalog rows | Want to read, title sort | Want to read + Japanese `進撃` | Want to read + romaji `shingeki` |
+| --- | ---: | ---: | ---: |
+| 10,000 | 3.029 ms | 4.016 ms | 0.366 ms |
+| 100,000 | 34.743 ms | 47.026 ms | 0.770 ms |
+
+A query-plan assertion verifies `idx_books_reading_status`; the status equality predicate is selected only when filtering so SQLite can use that index. Japanese two-character search uses the existing normalized fallback, while romaji uses trigram FTS. Reproduce with `cargo test --manifest-path src-tauri/Cargo.toml --lib smart_shelf_large_catalog_benchmark -- --ignored --nocapture`.

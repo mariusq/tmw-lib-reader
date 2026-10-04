@@ -1,4 +1,6 @@
+pub mod history;
 mod passages;
+pub mod shelves;
 
 use std::{
     fs,
@@ -371,22 +373,21 @@ impl Database {
 
     /// Only called after successful display; completion survives reopening.
     pub fn record_reader_open(&self, id: i64) -> rusqlite::Result<bool> {
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute("INSERT INTO reader_resume(book_id,last_read_at) VALUES(?1,?2) ON CONFLICT(book_id) DO UPDATE SET last_read_at=excluded.last_read_at", params![id, unix_timestamp()])?;
-        connection.query_row(
-            "SELECT finished FROM reader_resume WHERE book_id=?1",
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute("UPDATE books SET reading_status='reading' WHERE id=?1 AND reading_status IN ('unset','want')", [id])?;
+        transaction.execute("INSERT INTO reader_resume(book_id,last_read_at,finished) VALUES(?1,?2,(SELECT reading_status='finished' FROM books WHERE id=?1)) ON CONFLICT(book_id) DO UPDATE SET last_read_at=excluded.last_read_at", params![id, unix_timestamp()])?;
+        let finished = transaction.query_row(
+            "SELECT reading_status='finished' FROM books WHERE id=?1",
             [id],
             |row| row.get(0),
-        )
+        )?;
+        transaction.commit()?;
+        Ok(finished)
     }
 
     pub fn set_reader_finished(&self, id: i64, finished: bool) -> rusqlite::Result<()> {
-        let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute(
-            "UPDATE reader_resume SET finished=?2 WHERE book_id=?1",
-            params![id, finished],
-        )?;
-        Ok(())
+        self.set_reading_status(id, if finished { "finished" } else { "reading" })
     }
 
     /// Bounded indexed queries, including a separate primary resume candidate.
@@ -401,7 +402,7 @@ impl Database {
             FROM reader_resume rr JOIN books b ON b.id=rr.book_id
             JOIN library_roots r ON r.id=b.library_root_id
             LEFT JOIN book_overrides o ON o.book_id=b.id
-            WHERE rr.finished=0 {}
+            WHERE rr.finished=0 AND b.reading_status NOT IN ('paused','finished') {}
             ORDER BY rr.last_read_at DESC,rr.book_id DESC LIMIT {}",
             if available_only { "AND b.extraction_status<>'unavailable'" } else { "" },
             if available_only { 1 } else { 12 });
@@ -685,6 +686,7 @@ impl Database {
 
     pub fn browse_books(&self, request: &BrowseBooksRequest) -> rusqlite::Result<Vec<BrowserBook>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
+        shelves::validate_filter(request)?;
         let query = normalize_for_search(&request.query);
         let romaji_query = normalize_romaji(&request.query);
         let sort = match request.sort.as_str() {
@@ -706,7 +708,7 @@ impl Database {
             .collect::<Vec<_>>()
             .join(" OR ");
         let search_join = if use_fts {
-            "JOIN (SELECT book_id FROM book_search_fts WHERE book_search_fts MATCH ?9) matched ON matched.book_id=b.id"
+            "JOIN (SELECT book_id FROM book_search_fts WHERE book_search_fts MATCH ?10) matched ON matched.book_id=b.id"
         } else {
             ""
         };
@@ -729,6 +731,11 @@ impl Database {
         } else {
             "CASE WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized=?5 THEN 0 WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized LIKE ?5 || '%' THEN 1 WHEN d.title_reading=?5 OR d.title_romaji=?6 THEN 2 WHEN d.title_reading LIKE ?5 || '%' OR d.title_romaji LIKE ?6 || '%' THEN 3 WHEN d.title_romaji LIKE '%' || ?6 || '%' THEN 4 ELSE 5 END, "
         };
+        let status_predicate = if request.reading_status.is_some() {
+            "b.reading_status=?9"
+        } else {
+            "?9 IS NULL"
+        };
         let sql = format!(
             "SELECT b.id, b.library_root_id, b.file_name, b.parent_folder_path, \
              COALESCE(NULLIF(o.title, ''), NULLIF(b.discovered_title, ''), CASE WHEN lower(b.file_name) LIKE '%.epub' THEN substr(b.file_name, 1, length(b.file_name)-5) ELSE b.file_name END) AS effective_title, \
@@ -736,12 +743,13 @@ impl Database {
              COALESCE(NULLIF(o.series_name, ''), NULLIF(b.discovered_series, ''), '') AS effective_series, \
              COALESCE(NULLIF(o.volume_label, ''), NULLIF(b.discovered_series_index, ''), '') AS effective_volume, \
              COALESCE(NULLIF(o.cover_path, ''), b.discovered_cover_path), b.created_at, b.modified_time, \
-             (b.discovered_title IS NULL OR trim(b.discovered_title) = '' OR b.extraction_status = 'error') AS needs_metadata, b.extraction_status <> 'unavailable' AS is_available, EXISTS(SELECT 1 FROM reader_resume rr WHERE rr.book_id=b.id AND rr.finished=1) AS is_finished \
+             (b.discovered_title IS NULL OR trim(b.discovered_title) = '' OR b.extraction_status = 'error') AS needs_metadata, b.extraction_status <> 'unavailable' AS is_available, b.reading_status='finished' AS is_finished \
              FROM books b JOIN library_roots r ON r.id=b.library_root_id \
              LEFT JOIN book_overrides o ON o.book_id=b.id \
              LEFT JOIN book_search_documents d ON d.book_id=b.id \
              {search_join} \
-             WHERE (?1 IS NULL OR b.library_root_id=?1) \
+             WHERE {status_predicate} \
+             AND (?1 IS NULL OR b.library_root_id=?1) \
              AND (?2 IS NULL OR EXISTS (SELECT 1 FROM book_tags bt WHERE bt.book_id=b.id AND bt.tag_id=?2)) \
              AND (?3 IS NULL OR EXISTS (SELECT 1 FROM collection_books cb WHERE cb.book_id=b.id AND cb.collection_id=?3)) \
              AND (?4=0 OR b.discovered_title IS NULL OR trim(b.discovered_title)='' OR b.extraction_status='error') \
@@ -759,6 +767,10 @@ impl Database {
             Value::Text(romaji_query),
             Value::Integer(request.limit.clamp(1, 200)),
             Value::Integer(request.offset.max(0)),
+            request
+                .reading_status
+                .clone()
+                .map_or(Value::Null, Value::Text),
         ];
         if use_fts {
             parameter_values.push(Value::Text(fts_query));
@@ -982,6 +994,18 @@ fn run_migrations(connection: &mut Connection) -> rusqlite::Result<bool> {
         transaction.pragma_update(None, "user_version", 12)?;
         transaction.commit()?;
     }
+    if version < 13 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/013_lookup_history.sql"))?;
+        transaction.pragma_update(None, "user_version", 13)?;
+        transaction.commit()?;
+    }
+    if version < 14 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/014_reading_shelves.sql"))?;
+        transaction.pragma_update(None, "user_version", 14)?;
+        transaction.commit()?;
+    }
     Ok(version < 8)
 }
 
@@ -1175,6 +1199,58 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    #[ignore = "generated 10,000 and 100,000 row smart-shelf benchmark"]
+    fn smart_shelf_large_catalog_benchmark() {
+        for count in [10_000, 100_000] {
+            let dir = tempdir().unwrap();
+            let db = Database::open(&dir.path().join("catalog.sqlite3")).unwrap();
+            seed_query_fixture(&db, count);
+            db.connection
+                .lock()
+                .unwrap()
+                .execute("UPDATE books SET reading_status='want' WHERE id%5=0", [])
+                .unwrap();
+            let filter = BrowseBooksRequest {
+                reading_status: Some("want".into()),
+                library_root_id: None,
+                tag_id: None,
+                collection_id: None,
+                needs_metadata: false,
+                hide_duplicate_titles: false,
+                query: String::new(),
+                sort: "title".into(),
+                offset: 0,
+                limit: 80,
+            };
+            let connection = db.connection.lock().unwrap();
+            let mut stmt = connection
+                .prepare("EXPLAIN QUERY PLAN SELECT id FROM books WHERE reading_status='want'")
+                .unwrap();
+            let plan: Vec<String> = stmt
+                .query_map([], |r| r.get(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(plan.iter().any(|s| s.contains("idx_books_reading_status")));
+            drop(stmt);
+            drop(connection);
+            for query in ["", "進撃", "shingeki"] {
+                let mut request = filter.clone();
+                request.query = query.into();
+                let start = Instant::now();
+                for _ in 0..20 {
+                    let rows = db.browse_books(&request).unwrap();
+                    assert!(rows.len() <= 80);
+                }
+                eprintln!(
+                    "smart_shelves rows={count} query={query:?} mean_ms={:.3}",
+                    start.elapsed().as_secs_f64() * 1000.0 / 20.0
+                );
+            }
+        }
+    }
+
     fn seed_query_fixture(database: &Database, rows: usize) {
         let mut connection = database.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
@@ -1261,6 +1337,7 @@ mod tests {
             seed_query_fixture(&database, rows);
             let run = |query: &str, sort: &str, offset: i64| {
                 let request = BrowseBooksRequest {
+                    reading_status: None,
                     library_root_id: None,
                     tag_id: None,
                     collection_id: None,
@@ -1370,7 +1447,7 @@ mod tests {
         let foreign_keys: i64 = connection
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 14);
         assert_eq!(foreign_keys, 1);
         assert!(connection
             .query_row(
@@ -1887,6 +1964,7 @@ mod tests {
             })
             .unwrap();
         let request = |query: &str| BrowseBooksRequest {
+            reading_status: None,
             library_root_id: None,
             tag_id: None,
             collection_id: None,
@@ -1947,6 +2025,7 @@ mod tests {
             })
             .unwrap();
         let request = |query: &str| BrowseBooksRequest {
+            reading_status: None,
             library_root_id: None,
             tag_id: None,
             collection_id: None,
@@ -2011,6 +2090,7 @@ mod tests {
             ids.push(book.id);
         }
         let request = BrowseBooksRequest {
+            reading_status: None,
             library_root_id: None,
             tag_id: None,
             collection_id: None,
@@ -2086,6 +2166,7 @@ mod tests {
         let database = Database::open(&directory.path().join("catalog.sqlite3")).unwrap();
         seed_query_fixture(&database, 100_000);
         let mut request = BrowseBooksRequest {
+            reading_status: None,
             library_root_id: None,
             tag_id: None,
             collection_id: None,
@@ -2195,6 +2276,7 @@ mod tests {
             .save_reading_override(book.id, Some("しんげき"), Some("attack titan"))
             .unwrap();
         let request = |query: &str| BrowseBooksRequest {
+            reading_status: None,
             library_root_id: None,
             tag_id: None,
             collection_id: None,

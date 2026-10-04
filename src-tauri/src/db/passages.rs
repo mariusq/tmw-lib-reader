@@ -292,7 +292,7 @@ mod tests {
             .connection
             .lock()
             .unwrap()
-            .execute_batch("DROP TABLE saved_passages; PRAGMA user_version=11;")
+            .execute_batch("DROP TABLE saved_passages; DROP TABLE lookup_history; DROP TABLE smart_shelves; DROP INDEX idx_books_reading_status; ALTER TABLE books DROP COLUMN reading_status; ALTER TABLE books DROP COLUMN completed_at; PRAGMA user_version=11;")
             .unwrap();
         let backup = directory.path().join("previous.sqlite3");
         database.backup_to(&backup).unwrap();
@@ -317,6 +317,6 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 14);
     }
 }

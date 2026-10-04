@@ -1,3 +1,4 @@
+import { ReadingStatus } from "../../components/ReadingStatus";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import ePub, { type Book, type Rendition } from "epubjs";
 import { dictionaryTextAt, japaneseWordAt } from "./dictionaryText";
@@ -7,6 +8,7 @@ import { readerProgress, type ProgressLocation } from "./readerProgress";
 import { useEffect, useRef, useState } from "react";
 import { sentenceAt } from "./passageContext";
 import { SavedPassages } from "../../components/SavedPassages";
+import { LookupHistory } from "../../components/LookupHistory";
 
 type ReaderBook = { id: number; filePath: string; title: string };
 type Theme = "dark" | "light";
@@ -16,7 +18,45 @@ type DictionaryTarget = { surface: string; lemma: string; reading: string | null
 const FONT_MIN = 80;
 const FONT_MAX = 180;
 
-export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; onClose: () => void; initialCfi?: string }) {
+export function EpubReader({
+  bookId,
+  onClose,
+  initialCfi,
+}: {
+  bookId: number;
+  onClose: () => void;
+  initialCfi?: string;
+}) {
+  const [target, setTarget] = useState<{
+    sourceBookId: number;
+    bookId: number;
+    cfi: string;
+  } | null>(null);
+  const current = target?.sourceBookId === bookId ? target : null;
+  return (
+    <ReaderSession
+      key={current?.bookId ?? bookId}
+      bookId={current?.bookId ?? bookId}
+      initialCfi={current?.cfi ?? initialCfi}
+      onClose={onClose}
+      onHistoryJump={(nextBookId, cfi) =>
+        setTarget({ sourceBookId: bookId, bookId: nextBookId, cfi })
+      }
+    />
+  );
+}
+
+function ReaderSession({
+  bookId,
+  onClose,
+  initialCfi,
+  onHistoryJump,
+}: {
+  bookId: number;
+  onClose: () => void;
+  initialCfi?: string;
+  onHistoryJump: (bookId: number, cfi: string) => void;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const rendition = useRef<Rendition | null>(null);
   const book = useRef<Book | null>(null);
@@ -35,13 +75,18 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [finished, setFinished] = useState(false);
+  const [statusRevision, setStatusRevision] = useState(0);
   const [progress, setProgress] = useState<number | null>(null);
   const [dictionaryOpen, setDictionaryOpen] = useState(false);
-  const [dictionaryEnabled, setDictionaryEnabled] = useState(() => localStorage.getItem("tmw-dictionary-enabled") !== "false");
+  const [dictionaryEnabled, setDictionaryEnabled] = useState(
+    () => localStorage.getItem("tmw-dictionary-enabled") !== "false",
+  );
   const [dictionaryQuery, setDictionaryQuery] = useState("");
   const [dictionaryEntries, setDictionaryEntries] = useState<DictionaryEntry[]>([]);
   const [dictionaryError, setDictionaryError] = useState<string | null>(null);
-  const [dictionaryModifier, setDictionaryModifier] = useState<"alt" | "ctrl">(() => localStorage.getItem("tmw-dictionary-modifier") === "ctrl" ? "ctrl" : "alt");
+  const [dictionaryModifier, setDictionaryModifier] = useState<"alt" | "ctrl">(() =>
+    localStorage.getItem("tmw-dictionary-modifier") === "ctrl" ? "ctrl" : "alt",
+  );
   const [dictionaries, setDictionaries] = useState<DictionarySummary[]>([]);
   const [dictionaryStatus, setDictionaryStatus] = useState("Preparing bundled JMdict…");
   const [passagesOpen, setPassagesOpen] = useState(false);
@@ -51,6 +96,38 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
   const [savingPassage, setSavingPassage] = useState(false);
   const [selection, setSelection] = useState<{ surface: string; cfi: string } | null>(null);
   const lookupGeneration = useRef(0);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [lookupCount, setLookupCount] = useState<number | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  async function recordLookup(
+    entries: DictionaryEntry[],
+    surface: string,
+    generation: number,
+    anchor?: { cfi: string; sentence: string },
+  ) {
+    if (entries.length === 0 || generation !== lookupGeneration.current) return;
+    // Multiple senses can share an identity. Different headwords/readings remain unresolved.
+    const first = entries[0];
+    const reliable = entries.every(
+      (entry) => entry.term === first.term && entry.reading === first.reading,
+    );
+    try {
+      const count = await invoke<number | null>("record_lookup_history", {
+        request: {
+          surface,
+          entryId: reliable ? first.id : null,
+          bookId: anchor ? bookId : null,
+          locationCfi: anchor?.cfi ?? "",
+          sentence: anchor?.sentence ?? "",
+        },
+      });
+      if (generation === lookupGeneration.current) setLookupCount(count);
+    } catch (reason) {
+      if (generation === lookupGeneration.current)
+        setHistoryError(`Could not record lookup history: ${String(reason)}`);
+    }
+  }
 
   async function refreshDictionaries() {
     try { setDictionaries(await invoke<DictionarySummary[]>("list_dictionaries")); } catch { setDictionaries([]); }
@@ -58,26 +135,73 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
 
   async function lookupDictionary(query: string) {
     const generation = ++lookupGeneration.current;
-    setDictionaryQuery(query); setDictionaryOpen(true); setDictionaryError(null);
-    try { const entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query }); if (generation === lookupGeneration.current) setDictionaryEntries(entries); }
-    catch (reason) { if (generation === lookupGeneration.current) { setDictionaryEntries([]); setDictionaryError(`Dictionary lookup failed: ${String(reason)}`); } }
+    setDictionaryQuery(query);
+    setDictionaryOpen(true);
+    setDictionaryError(null);
+    setSelection(null);
+    setLookupCount(null);
+    setHistoryError(null);
+    setDictionaryEntries([]);
+    try {
+      const entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query });
+      if (generation === lookupGeneration.current) {
+        setDictionaryEntries(entries);
+        await recordLookup(entries, query, generation);
+      }
+    } catch (reason) {
+      if (generation === lookupGeneration.current) {
+        setDictionaryEntries([]);
+        setDictionaryError(`Dictionary lookup failed: ${String(reason)}`);
+      }
+    }
   }
 
   async function lookupTarget(text: string, offset: number, cfi: string) {
     const generation = ++lookupGeneration.current;
+    setLookupCount(null);
+    setHistoryError(null);
     setSelection({ surface: japaneseWordAt(text, offset), cfi });
-    setSentence(sentenceAt(text, offset)); setPassageNote(""); setPassageMessage(null);
+    setSentence(sentenceAt(text, offset));
+    setPassageNote("");
+    setPassageMessage(null);
     setDictionaryEntries([]);
     try {
       const target = await invoke<DictionaryTarget>("tokenize_dictionary_target", { text, offset });
       if (generation !== lookupGeneration.current) return;
       setSelection({ surface: target.surface, cfi });
-      setDictionaryQuery(target.surface); setDictionaryOpen(true); setDictionaryError(null);
+      setDictionaryQuery(target.surface);
+      setDictionaryOpen(true);
+      setDictionaryError(null);
       let entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: target.surface });
-      if (entries.length === 0 && target.lemma !== target.surface) entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: target.lemma });
-      if (entries.length === 0 && target.reading) entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: target.reading });
-      if (generation === lookupGeneration.current) setDictionaryEntries(entries);
-    } catch { if (generation === lookupGeneration.current) await lookupDictionary(japaneseWordAt(text, offset)); }
+      if (entries.length === 0 && target.lemma !== target.surface)
+        entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: target.lemma });
+      if (entries.length === 0 && target.reading)
+        entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: target.reading });
+      if (generation === lookupGeneration.current) {
+        setDictionaryEntries(entries);
+        await recordLookup(entries, target.surface, generation, {
+          cfi,
+          sentence: sentenceAt(text, offset),
+        });
+      }
+    } catch {
+      if (generation !== lookupGeneration.current) return;
+      const surface = japaneseWordAt(text, offset);
+      setDictionaryQuery(surface);
+      setDictionaryOpen(true);
+      try {
+        const entries = await invoke<DictionaryEntry[]>("lookup_dictionary", { query: surface });
+        if (generation === lookupGeneration.current) {
+          setDictionaryEntries(entries);
+          await recordLookup(entries, surface, generation, {
+            cfi,
+            sentence: sentenceAt(text, offset),
+          });
+        }
+      } catch (reason) {
+        if (generation === lookupGeneration.current) setDictionaryError(String(reason));
+      }
+    }
   }
 
   async function savePassage() {
@@ -229,17 +353,41 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
             Positions are saved locally. Source EPUB files are read-only.
           </p>
           {progress !== null && !busy && !error && (
-            <p className="text-xs tabular-nums opacity-60" aria-label={`Book progress: approximately ${progress.toFixed(1)} percent`} title="Estimated from chapter and page position; chapters are weighted equally.">
+            <p
+              className="text-xs tabular-nums opacity-60"
+              aria-label={`Book progress: approximately ${progress.toFixed(1)} percent`}
+              title="Estimated from chapter and page position; chapters are weighted equally."
+            >
               ≈ {progress.toFixed(1)}% read
             </p>
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button className="reader-control" onClick={() => setPassagesOpen(value => !value)}>Saved passages</button>
-          <button className="reader-control" disabled={busy} aria-pressed={finished} onClick={() => {
-            void invoke("set_reader_finished", { bookId, finished: !finished })
-              .then(() => setFinished(!finished)).catch(reason => setError(String(reason)));
-          }}>{finished ? "Finished · Mark unfinished" : "Mark finished"}</button>
+          <button
+            className="reader-control"
+            onClick={() => {
+              setHistoryOpen((value) => !value);
+              setPassagesOpen(false);
+            }}
+          >
+            Lookup history
+          </button>
+          <button className="reader-control" onClick={() => setPassagesOpen((value) => !value)}>
+            Saved passages
+          </button>
+          <button
+            className="reader-control"
+            disabled={busy}
+            aria-pressed={finished}
+            onClick={() => {
+              void invoke("set_reader_finished", { bookId, finished: !finished })
+                .then(() => { setFinished(!finished); setStatusRevision(value => value + 1); })
+                .catch((reason) => setError(String(reason)));
+            }}
+          >
+            {finished ? "Finished · Mark unfinished" : "Mark finished"}
+          </button>
+          {!busy && !error && <ReadingStatus key={statusRevision} bookId={bookId} onChanged={() => { void invoke<{status: string}>("get_reading_state", { bookId }).then(state => setFinished(state.status === "finished")); }} />}
           <button
             className="reader-control"
             onClick={() => setFontSize((size) => Math.max(FONT_MIN, size - 10))}
@@ -261,7 +409,10 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
           >
             {theme === "dark" ? "Light" : "Dark"}
           </button>
-          <button className="reader-control" onClick={() => setDictionaryEnabled((value) => !value)}>
+          <button
+            className="reader-control"
+            onClick={() => setDictionaryEnabled((value) => !value)}
+          >
             Dict {dictionaryEnabled ? "on" : "off"}
           </button>
           <button className="reader-control" onClick={onClose}>
@@ -288,15 +439,135 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
           </div>
         )}
         {dictionaryOpen && (
-          <aside className={`dictionary-popup ${theme === "dark" ? "bg-stone-900 text-stone-100" : "bg-white text-stone-900"}`} aria-label="Offline dictionary">
-            <div className="flex items-center gap-2"><input className="dictionary-input" value={dictionaryQuery} onChange={(event) => setDictionaryQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void lookupDictionary(dictionaryQuery); }} autoFocus /><button className="reader-control" onClick={() => void lookupDictionary(dictionaryQuery)}>Look up</button><button className="reader-control" onClick={() => setDictionaryOpen(false)}>×</button></div>
+          <aside
+            className={`dictionary-popup ${theme === "dark" ? "bg-stone-900 text-stone-100" : "bg-white text-stone-900"}`}
+            aria-label="Offline dictionary"
+          >
+            <div className="flex items-center gap-2">
+              <input
+                className="dictionary-input"
+                value={dictionaryQuery}
+                onChange={(event) => setDictionaryQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void lookupDictionary(dictionaryQuery);
+                }}
+                autoFocus
+              />
+              <button
+                className="reader-control"
+                onClick={() => void lookupDictionary(dictionaryQuery)}
+              >
+                Look up
+              </button>
+              <button className="reader-control" onClick={() => setDictionaryOpen(false)}>
+                ×
+              </button>
+            </div>
             {dictionaryError && <p className="mt-3 text-sm text-red-400">{dictionaryError}</p>}
-            {!dictionaryError && dictionaryEntries.length === 0 && <p className="mt-3 text-sm opacity-70">No enabled JMdict entry found. The term remains editable for a broader lookup.</p>}
-            {dictionaryEntries.map((entry) => <article key={entry.id} className="mt-3 border-t border-current/15 pt-2"><div className="font-medium">{entry.term} {entry.reading && <span className="text-sm opacity-70">{entry.reading}</span>}</div>{entry.partOfSpeech.length > 0 && <div className="text-xs opacity-60">{entry.partOfSpeech.join(" · ")}</div>}<ul className="mt-1 list-disc pl-5 text-sm">{entry.definitions.slice(0, 8).map((definition, index) => <li key={index}>{definition}</li>)}</ul></article>)}
-            {selection && <div className="mt-4 space-y-2 border-t border-current/15 pt-3"><label className="block text-sm">Sentence<textarea className="dictionary-input w-full" maxLength={4000} value={sentence} onChange={event => setSentence(event.target.value)} /></label><label className="block text-sm">Optional note<input className="dictionary-input w-full" maxLength={2000} value={passageNote} onChange={event => setPassageNote(event.target.value)} /></label><button className="reader-control" disabled={savingPassage} onClick={() => void savePassage()}>{savingPassage ? "Saving…" : "Save passage"}</button>{passageMessage && <p role="status" className="text-sm">{passageMessage}</p>}</div>}
+            {lookupCount !== null && (
+              <p className="mt-2 text-xs opacity-70">
+                Looked up {lookupCount} {lookupCount === 1 ? "time" : "times"} in retained history
+              </p>
+            )}
+            {historyError && (
+              <p role="alert" className="mt-2 text-sm text-amber-400">
+                {historyError}
+              </p>
+            )}
+            {!dictionaryError && dictionaryEntries.length === 0 && (
+              <p className="mt-3 text-sm opacity-70">
+                No enabled JMdict entry found. The term remains editable for a broader lookup.
+              </p>
+            )}
+            {dictionaryEntries.map((entry) => (
+              <article key={entry.id} className="mt-3 border-t border-current/15 pt-2">
+                <div className="font-medium">
+                  {entry.term}{" "}
+                  {entry.reading && <span className="text-sm opacity-70">{entry.reading}</span>}
+                </div>
+                {entry.partOfSpeech.length > 0 && (
+                  <div className="text-xs opacity-60">{entry.partOfSpeech.join(" · ")}</div>
+                )}
+                <ul className="mt-1 list-disc pl-5 text-sm">
+                  {entry.definitions.slice(0, 8).map((definition, index) => (
+                    <li key={index}>{definition}</li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+            {selection && (
+              <div className="mt-4 space-y-2 border-t border-current/15 pt-3">
+                <label className="block text-sm">
+                  Sentence
+                  <textarea
+                    className="dictionary-input w-full"
+                    maxLength={4000}
+                    value={sentence}
+                    onChange={(event) => setSentence(event.target.value)}
+                  />
+                </label>
+                <label className="block text-sm">
+                  Optional note
+                  <input
+                    className="dictionary-input w-full"
+                    maxLength={2000}
+                    value={passageNote}
+                    onChange={(event) => setPassageNote(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="reader-control"
+                  disabled={savingPassage}
+                  onClick={() => void savePassage()}
+                >
+                  {savingPassage ? "Saving…" : "Save passage"}
+                </button>
+                {passageMessage && (
+                  <p role="status" className="text-sm">
+                    {passageMessage}
+                  </p>
+                )}
+              </div>
+            )}
           </aside>
         )}
-        {passagesOpen && <aside className={`absolute inset-y-0 right-0 z-10 w-full max-w-xl overflow-y-auto p-5 ${theme === "dark" ? "bg-stone-900" : "bg-white"}`}><button className="reader-control mb-4" onClick={() => setPassagesOpen(false)}>Close passages</button><SavedPassages bookId={bookId} onJump={async (_passage, cfi) => { if (!rendition.current) throw new Error("Reader is not ready."); await rendition.current.display(cfi); setPassagesOpen(false); }} /></aside>}
+        {passagesOpen && (
+          <aside
+            className={`absolute inset-y-0 right-0 z-10 w-full max-w-xl overflow-y-auto p-5 ${theme === "dark" ? "bg-stone-900" : "bg-white"}`}
+          >
+            <button className="reader-control mb-4" onClick={() => setPassagesOpen(false)}>
+              Close passages
+            </button>
+            <SavedPassages
+              bookId={bookId}
+              onJump={async (_passage, cfi) => {
+                if (!rendition.current) throw new Error("Reader is not ready.");
+                await rendition.current.display(cfi);
+                setPassagesOpen(false);
+              }}
+            />
+          </aside>
+        )}
+        {historyOpen && (
+          <aside
+            className={`absolute inset-y-0 right-0 z-20 w-full max-w-xl overflow-y-auto p-5 ${theme === "dark" ? "bg-stone-900" : "bg-white"}`}
+          >
+            <button className="reader-control mb-4" onClick={() => setHistoryOpen(false)}>
+              Close history
+            </button>
+            <LookupHistory
+              onJump={async (targetBookId, cfi) => {
+                if (targetBookId !== bookId) {
+                  onHistoryJump(targetBookId, cfi);
+                  return;
+                }
+                if (!rendition.current) throw new Error("Reader is not ready.");
+                await rendition.current.display(cfi);
+                setHistoryOpen(false);
+              }}
+            />
+          </aside>
+        )}
       </section>
       <footer
         className={`flex shrink-0 justify-between border-t p-3 ${theme === "dark" ? "border-white/10 bg-stone-900" : "border-stone-300 bg-white"}`}
@@ -309,10 +580,49 @@ export function EpubReader({ bookId, onClose, initialCfi }: { bookId: number; on
           ← 次へ
         </button>
         <span className="self-center text-xs opacity-60">← 次へ · → 前へ · Esc closes</span>
-        <span className="self-center text-xs opacity-60" title="The bundled JMdict index is stored locally and can be safely rebuilt.">{dictionaryStatus}</span>
-        <button className="reader-control" onClick={async () => { setDictionaryStatus("Rebuilding local index…"); try { const count = await invoke<number>("ensure_bundled_dictionary", { rebuild: true }); setDictionaryStatus(`Ready · ${count.toLocaleString()} local entries`); await refreshDictionaries(); } catch (reason) { setDictionaryStatus(`Unavailable: ${String(reason)}`); } }}>Rebuild dictionary</button>
-        <button className="reader-control" onClick={() => setDictionaryModifier((value) => value === "alt" ? "ctrl" : "alt")}>Trigger: {dictionaryModifier === "alt" ? "Alt-click" : "Ctrl-click"}</button>
-        {dictionaries.map((dictionary) => <button key={dictionary.id} className="reader-control" title={`${dictionary.entryCount.toLocaleString()} local entries`} onClick={async () => { await invoke("set_dictionary_enabled", { dictionaryId: dictionary.id, enabled: !dictionary.enabled }); await refreshDictionaries(); }}>{dictionary.name}: {dictionary.enabled ? "on" : "off"}</button>)}
+        <span
+          className="self-center text-xs opacity-60"
+          title="The bundled JMdict index is stored locally and can be safely rebuilt."
+        >
+          {dictionaryStatus}
+        </span>
+        <button
+          className="reader-control"
+          onClick={async () => {
+            setDictionaryStatus("Rebuilding local index…");
+            try {
+              const count = await invoke<number>("ensure_bundled_dictionary", { rebuild: true });
+              setDictionaryStatus(`Ready · ${count.toLocaleString()} local entries`);
+              await refreshDictionaries();
+            } catch (reason) {
+              setDictionaryStatus(`Unavailable: ${String(reason)}`);
+            }
+          }}
+        >
+          Rebuild dictionary
+        </button>
+        <button
+          className="reader-control"
+          onClick={() => setDictionaryModifier((value) => (value === "alt" ? "ctrl" : "alt"))}
+        >
+          Trigger: {dictionaryModifier === "alt" ? "Alt-click" : "Ctrl-click"}
+        </button>
+        {dictionaries.map((dictionary) => (
+          <button
+            key={dictionary.id}
+            className="reader-control"
+            title={`${dictionary.entryCount.toLocaleString()} local entries`}
+            onClick={async () => {
+              await invoke("set_dictionary_enabled", {
+                dictionaryId: dictionary.id,
+                enabled: !dictionary.enabled,
+              });
+              await refreshDictionaries();
+            }}
+          >
+            {dictionary.name}: {dictionary.enabled ? "on" : "off"}
+          </button>
+        ))}
         <button
           className="reader-control"
           disabled={!!error || busy}

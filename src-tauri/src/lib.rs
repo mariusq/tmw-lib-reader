@@ -446,6 +446,43 @@ fn record_reader_open(database: State<'_, db::Database>, book_id: i64) -> Result
 }
 
 #[tauri::command]
+fn get_reading_state(
+    database: State<'_, db::Database>,
+    book_id: i64,
+) -> Result<db::shelves::ReadingState, String> {
+    database.reading_state(book_id).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn set_reading_status(
+    database: State<'_, db::Database>,
+    book_id: i64,
+    status: String,
+) -> Result<(), String> {
+    database
+        .set_reading_status(book_id, &status)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn list_smart_shelves(
+    database: State<'_, db::Database>,
+) -> Result<Vec<db::shelves::SmartShelf>, String> {
+    database.smart_shelves().map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn save_smart_shelf(
+    database: State<'_, db::Database>,
+    shelf: db::shelves::SmartShelf,
+) -> Result<i64, String> {
+    database.save_smart_shelf(&shelf).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn delete_smart_shelf(database: State<'_, db::Database>, shelf_id: i64) -> Result<(), String> {
+    database
+        .delete_smart_shelf(shelf_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_reader_finished(
     database: State<'_, db::Database>,
     book_id: i64,
@@ -592,6 +629,35 @@ fn lookup_dictionary(
     database
         .dictionary_lookup(&query)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn record_lookup_history(
+    database: State<'_, db::Database>,
+    request: db::history::LookupRecord,
+) -> Result<Option<i64>, String> {
+    database.record_lookup(&request).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn list_lookup_history(
+    database: State<'_, db::Database>,
+    query: String,
+    offset: i64,
+) -> Result<Vec<db::history::LookupHistory>, String> {
+    database
+        .lookup_history(&query, offset)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn clear_lookup_history(database: State<'_, db::Database>) -> Result<(), String> {
+    database.clear_lookup_history().map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn get_lookup_history_location(
+    database: State<'_, db::Database>,
+    id: i64,
+) -> Result<String, String> {
+    database.lookup_history_location(id)
 }
 
 #[tauri::command]
@@ -772,6 +838,11 @@ pub fn run() {
             list_resume_books,
             record_reader_open,
             set_reader_finished,
+            get_reading_state,
+            set_reading_status,
+            list_smart_shelves,
+            save_smart_shelf,
+            delete_smart_shelf,
             get_reading_location,
             save_reading_location,
             ensure_bundled_dictionary,
@@ -780,7 +851,11 @@ pub fn run() {
             set_app_setting,
             list_dictionaries,
             set_dictionary_enabled,
-            lookup_dictionary
+            lookup_dictionary,
+            record_lookup_history,
+            list_lookup_history,
+            clear_lookup_history,
+            get_lookup_history_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running TMW Library");

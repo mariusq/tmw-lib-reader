@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { ReadingStatus } from "./ReadingStatus";
 import { EpubReader } from "../features/reader/EpubReader";
 
 type Override = {
@@ -203,6 +204,7 @@ export function BookDetailsPanel({
           </button>
         </div>
       </div>
+      <section className="mt-5"><ReadingStatus bookId={bookId} onChanged={onSaved} /></section>
       <section className="mt-7">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold">Your corrections</h2>

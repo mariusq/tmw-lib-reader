@@ -167,9 +167,11 @@ pub struct BatchTagRequest {
     pub tag_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BrowseBooksRequest {
+    #[serde(default)]
+    pub reading_status: Option<String>,
     pub library_root_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub collection_id: Option<i64>,
