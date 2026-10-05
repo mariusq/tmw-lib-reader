@@ -13,12 +13,29 @@ class TestIntersectionObserver {
 vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
 
 describe("LibraryShell", () => {
+  it("uses the Settings confidence level only while duplicate hiding is checked", async () => {
+    localStorage.setItem("tmw-duplicate-filtering", "all");
+    render(<LibraryShell />);
+    fireEvent.click(screen.getByRole("button", { name: "すべての本を見る" }));
+    const toggle = screen.getByRole("checkbox", { name: "同名の重複を隠す" });
+    fireEvent.click(toggle);
+    expect(invoke).toHaveBeenCalledWith("browse_books", expect.objectContaining({ request: expect.objectContaining({ duplicateFiltering: "all" }) }));
+    fireEvent.click(toggle);
+    expect(invoke).toHaveBeenLastCalledWith("browse_books", expect.objectContaining({ request: expect.objectContaining({ duplicateFiltering: "off" }) }));
+    fireEvent.click(screen.getByRole("button", { name: "設定" }));
+    expect(screen.getByRole("combobox", { name: "重複する本" })).toHaveValue("all");
+    fireEvent.change(screen.getByRole("combobox", { name: "重複する本" }), { target: { value: "high" } });
+    expect(localStorage.getItem("tmw-duplicate-filtering")).toBe("high");
+    localStorage.removeItem("tmw-duplicate-filtering");
+  });
   it("renders the empty library state", () => {
     render(<LibraryShell />);
     expect(screen.getByRole("heading", { name: "続きを読む" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "すべての本を見る" }));
     expect(screen.getByRole("heading", { name: "すべての本" })).toBeInTheDocument();
     expect(screen.getByRole("searchbox", { name: "タイトル・著者・フォルダーを検索" })).toBeInTheDocument();
+    expect(screen.getByText("絞り込み", { selector: "summary" }).parentElement).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("絞り込み", { selector: "summary" }));
     expect(screen.getByRole("checkbox", { name: "同名の重複を隠す" })).toBeInTheDocument();
   });
   it("shows finished checkmarks in grid and list, including collection filters", async () => {
@@ -34,6 +51,7 @@ describe("LibraryShell", () => {
     fireEvent.click(screen.getByRole("button", { name: "すべての本を見る" }));
     expect(await screen.findByRole("img", { name: "読了" })).toBeInTheDocument();
     expect(screen.getAllByRole("img", { name: "読了" })).toHaveLength(1);
+    fireEvent.click(screen.getByText("絞り込み", { selector: "summary" }));
     fireEvent.change(screen.getByRole("combobox", { name: "コレクションで絞り込み" }), { target: { value: "7" } });
     fireEvent.click(screen.getByRole("button", { name: "リスト" }));
     expect(screen.getAllByRole("img", { name: "読了" })).toHaveLength(1);
@@ -52,7 +70,8 @@ describe("LibraryShell", () => {
     expect(screen.getByRole("heading", { name: "最近追加" })).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("browse_books", expect.objectContaining({ request: expect.objectContaining({ sort: "dateAdded" }) }));
     fireEvent.click(screen.getByRole("button", { name: "要確認のメタデータ" }));
-    expect(screen.getByRole("checkbox", { name: "要確認のみ" })).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "要確認のみ" })).not.toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("browse_books", expect.objectContaining({ request: expect.objectContaining({ needsMetadata: true }) }));
 
     fireEvent.click(navigation.getByRole("button", { name: "読書ノート" }));
     expect(await screen.findByRole("heading", { name: /Saved passages/ })).toBeInTheDocument();

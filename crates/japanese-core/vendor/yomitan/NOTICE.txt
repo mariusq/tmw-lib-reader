@@ -1,0 +1,8 @@
+Yomitan Japanese language transforms
+Copyright (C) 2024-2026 Yomitan Authors.
+GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later).
+Pinned upstream source: https://github.com/yomidevs/yomitan/tree/77e200428902abf4fa48284df92da7af3dcb4162
+Reused files: ext/js/language/ja/japanese-transforms.js, ext/js/language/language-transforms.js, and ext/js/language/language-transformer.js.
+Adapted into TMW Japanese lookup candidate generation and grammatical rule handling on 2026-10-05. Original source files and license are retained in crates/japanese-core/vendor/yomitan.
+This code is provided WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+Dictionary data and user-imported dictionaries have separate licenses; this notice applies to the reused Yomitan program code.

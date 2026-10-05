@@ -43,6 +43,7 @@ internal class MobileStorage(activity: Activity,
     private val obsolete=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val activeCovers=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock=Any()
+    private val userData:UserSyncStorage
     init {
         db.enableWriteAheadLogging()
         db.execSQL("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL)")
@@ -71,8 +72,21 @@ internal class MobileStorage(activity: Activity,
         db.execSQL("DELETE FROM pending")
         covers.listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
         synchronized(cacheLock) { enforce(0) }
+        userData=UserSyncStorage(db,{setting("namespace")},request={body ->
+            val c=connect("/v3/user-sync",body,null)
+            try {
+                requireProtocolEndpoint(c.responseCode)
+                if(c.responseCode==409) {
+                    val error=c.errorStream?.use {input ->val out=java.io.ByteArrayOutputStream();val buf=ByteArray(1024);while(true) {val n=input.read(buf);if(n<0)break;require(out.size()+n<=8192);out.write(buf,0,n)};out.toString("UTF-8")}?:""
+                    if(error.contains("cursor_reset"))throw IllegalStateException("cursor_reset")
+                    throw IllegalStateException("User sync conflict; refresh the paired catalog")
+                }
+                JSONObject(String(bytes(c,1_000_000),Charsets.UTF_8))
+            } finally {c.disconnect()}
+        })
     }
     private fun setting(k:String):String?=db.rawQuery("SELECT v FROM settings WHERE k=?",arrayOf(k)).use { if(it.moveToFirst())it.getString(0) else null }
+    fun export(output:java.io.OutputStream, webState:JSONObject) { RecoveryExport.write(db,output,webState) }
     private fun set(k:String,v:String) { db.execSQL("INSERT OR REPLACE INTO settings VALUES(?,?)",arrayOf(k,v)) }
     private fun transaction(block:()->Unit) { db.beginTransaction();try {block();db.setTransactionSuccessful()} finally {db.endTransaction()} }
     private fun valid(id:String):String {require(id.matches(Regex("[a-f0-9]{32}")));return id}
@@ -80,6 +94,7 @@ internal class MobileStorage(activity: Activity,
     private fun checkCancel() {check(!canceled.get()) {"Canceled; completed copies and catalog are preserved"} }
     private fun progress(message:String,done:Long=0,total:Long=0) {status=JSONObject().put("busy",true).put("message",message).put("done",done).put("total",total)}
     private fun bytes(c:HttpsURLConnection,max:Int):ByteArray {
+        if(c.url.path=="/v2/catalog")requireProtocolEndpoint(c.responseCode)
         require(c.responseCode==200) {if(c.responseCode==409)"restart_snapshot" else "PC request failed (${c.responseCode}); check pairing/service"}
         val out=java.io.ByteArrayOutputStream();c.inputStream.use { input -> val buf=ByteArray(8192);while(true) {val n=input.read(buf);if(n<0)break;require(out.size()+n<=max);out.write(buf,0,n)} };return out.toByteArray()
     }
@@ -109,7 +124,7 @@ internal class MobileStorage(activity: Activity,
                     db.execSQL("DELETE FROM settings WHERE k IN ('checkpoint','cursor')");checkpoint=null;continue
                 };throw e
             }
-            require(response.getInt("protocolVersion")==2)
+            requireProtocol(response,2)
             require(StatFs(root.path).availableBytes>response.toString().length*4L+32_000_000) {"Insufficient storage for catalog page"}
             val ns=valid(response.getString("catalogId"));val items=response.getJSONArray("items");require(items.length()<=50)
             if(cp.has("catalogId")) require(cp.getString("catalogId")==ns)
@@ -172,22 +187,31 @@ internal class MobileStorage(activity: Activity,
     }
     private fun download(ns:String,id:String) {
         require(ns==setting("namespace")) {"Select the current paired catalog"}
-        val info=json("/v1/books/${valid(id)}/content")
+        progress("Checking book version on PC")
+        val info=try {json("/v1/books/${valid(id)}/content")} catch(e:java.io.IOException) {
+            throw java.io.IOException("Book version request interrupted: ${e.message ?: "connection ended"}")
+        }
         val version=info.getString("contentVersion");require(version.matches(Regex("sha256-[a-f0-9]{64}")))
         val length=info.getLong("bytes");require(length in 1..64_000_000) {"Reader supports copies up to 64 MB, not the PC's 512 MB maximum"}
         require(StatFs(books.path).availableBytes>length+32_000_000) {"Insufficient free storage (32 MB reserve required)"}
         val name=hash("$ns:$id:$version".toByteArray())+".epub";val part=File(books,"transfer.part");val target=File(books,name)
         val c=connect("/v1/books/$id/epub",null,version);socket=c
+        progress("Waiting for EPUB response",0,length)
+        var received=0L
+        var phase="response headers"
         try {
             require(c.responseCode==200) {"Download rejected (${c.responseCode}); source may have changed"}
             require(c.contentLengthLong==length && c.getHeaderField("ETag")?.trim('"')==version) {"Source version/length changed"}
+            phase="EPUB body"
             val digest=MessageDigest.getInstance("SHA-256");var total=0L;var tick=0L;val deadline=System.nanoTime()+180_000_000_000L
             FileOutputStream(part).use {out ->c.inputStream.use {input ->val buf=ByteArray(65536);while(true) {
                 checkCancel();require(System.nanoTime()<deadline) {"Transfer deadline exceeded"};val n=input.read(buf);if(n<0)break
-                total+=n;require(total<=length);digest.update(buf,0,n);out.write(buf,0,n)
+                total+=n;received=total;require(total<=length);digest.update(buf,0,n);out.write(buf,0,n)
                 if(System.currentTimeMillis()-tick>200) {progress("Downloading",total,length);tick=System.currentTimeMillis()}
             }};out.fd.sync()}
             require(total==length && "sha256-"+digest.digest().joinToString("") {"%02x".format(it)}==version) {"Download integrity mismatch; existing copy retained"}
+            phase="EPUB validation"
+            progress("Validating EPUB",total,length)
             validateBook(part);checkCancel()
             val old=downloadRow(ns,id)
             db.execSQL("INSERT OR REPLACE INTO pending VALUES(?,?,?,?,?,?)",arrayOf<Any?>(ns,id,version,name,length,old?.getString("file")))
@@ -195,6 +219,8 @@ internal class MobileStorage(activity: Activity,
             transaction { db.execSQL("INSERT OR REPLACE INTO downloads VALUES(?,?,?,?,?)",arrayOf<Any>(ns,id,version,name,length)) }
             if(old!=null && old.getString("file")!=name) File(books,old.getString("file")).delete()
             db.execSQL("DELETE FROM pending WHERE ns=? AND id=?",arrayOf(ns,id))
+        } catch(e:java.io.IOException) {
+            throw java.io.IOException("$phase failed after $received / $length bytes: ${e.message ?: "connection ended"}. Existing copies are preserved.")
         } finally {socket=null;c.disconnect();part.delete()}
     }
     private fun validateBook(file:File) {
@@ -208,6 +234,18 @@ internal class MobileStorage(activity: Activity,
         }
     }
     private fun downloadRow(ns:String,id:String):JSONObject?=db.rawQuery("SELECT version,file,bytes FROM downloads WHERE ns=? AND id=?",arrayOf(ns,id)).use {if(!it.moveToFirst())null else JSONObject().put("version",it.getString(0)).put("file",it.getString(1)).put("bytes",it.getLong(2))}
+    private fun markOpened(args:JSONObject):JSONObject {
+        val ns=valid(args.getString("ns"));val id=valid(args.getString("id"))
+        require(downloadRow(ns,id)!=null) {"No downloaded copy"}
+        val previous=JSONArray(setting("recent-books-"+ns)?:"[]")
+        val recent=JSONArray().put(id)
+        for(i in 0 until previous.length()) {
+            val old=previous.getString(i)
+            if(old!=id && recent.length()<5)recent.put(old)
+        }
+        db.execSQL("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)",arrayOf("recent-books-"+ns,recent.toString()))
+        return JSONObject()
+    }
     private fun browse(args:JSONObject):JSONObject {
         val ns=args.optString("ns",setting("namespace")?:""); val offset=args.optInt("offset",0);require(offset in 0..1_000_000)
         val query=args.optString("query");require(query.length<=512)
@@ -217,7 +255,9 @@ internal class MobileStorage(activity: Activity,
         if(normalized.isNotEmpty()) {where+=" AND (instr(lower(c.search),?)>0 OR instr(lower(c.search),?)>0)";params.add(normalized);params.add(args.optString("romajiQuery",normalized))}
         when(args.optString("filter")) {"downloaded"->where+=" AND d.id IS NOT NULL";"available"->where+=" AND c.available=1 AND c.deleted=0";"unavailable"->where+=" AND (c.available=0 OR c.deleted=1)";"finished"->where+=" AND json_extract(c.json,'$.readingStatus')='finished'"}
         for(key in listOf("tags","collections")) {val name=args.optString(key);if(name.isNotEmpty()) {where+=" AND EXISTS(SELECT 1 FROM json_each(c.json,'$.$key') m WHERE json_extract(m.value,'$.name')=?)";params.add(name)}}
-        val sort=when(args.optString("sort")) {"author"->"c.creator COLLATE NOCASE,c.title COLLATE NOCASE";"series"->"c.series COLLATE NOCASE,c.title COLLATE NOCASE";"modified"->"c.modified DESC";"dateAdded"->"c.dateAdded DESC";else->"c.title COLLATE NOCASE"}
+        val recent=args.optBoolean("recent")
+        if(recent)where+=" AND d.id IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(COALESCE((SELECT v FROM settings WHERE k='recent-books-'||c.ns),'[]')) r WHERE r.value=c.id)"
+        val sort=if(recent)"(SELECT CAST(r.key AS INTEGER) FROM json_each((SELECT v FROM settings WHERE k='recent-books-'||c.ns)) r WHERE r.value=c.id)" else when(args.optString("sort")) {"author"->"c.creator COLLATE NOCASE,c.title COLLATE NOCASE";"series"->"c.series COLLATE NOCASE,c.title COLLATE NOCASE";"modified"->"c.modified DESC";"dateAdded"->"c.dateAdded DESC";else->"c.title COLLATE NOCASE"}
         val rows=JSONArray();db.rawQuery("SELECT c.json,c.deleted,c.available,d.version,d.file,d.bytes FROM catalog c LEFT JOIN downloads d ON d.ns=c.ns AND d.id=c.id WHERE $where ORDER BY $sort,c.id LIMIT 25 OFFSET $offset",params.toTypedArray()).use {c ->while(c.moveToNext()) {
             val row=JSONObject(c.getString(0)).put("ns",ns).put("deleted",c.getInt(1)==1).put("available",c.getInt(2)==1)
             if(!c.isNull(3) && File(books,c.getString(4)).isFile) row.put("download",JSONObject().put("version",c.getString(3)).put("file",c.getString(4)).put("bytes",c.getLong(5)))
@@ -316,6 +356,8 @@ internal class MobileStorage(activity: Activity,
         if(action=="coverGeneration") {coverGeneration.set(args.getLong("generation"));coverSockets.values.forEach {it.disconnect()};resolve(JSONObject());return}
         if(action=="coverCancel") {val token=args.getString("token");if(activeCovers.contains(token))obsolete.add(token);coverSockets[token]?.disconnect();resolve(JSONObject());return}
         if(action=="status") {resolve(JSONObject(status.toString()));return}
+        if(action=="userSync") {resolve(userData.start());return}
+        if(action=="userSyncStatus") {resolve(userData.status());return}
         if(action=="sync" || action=="download") {
             if(!running.compareAndSet(false,true)) {invoke.reject("A catalog/transfer job is already running");return}
             canceled.set(false);progress("Starting")
@@ -329,9 +371,17 @@ internal class MobileStorage(activity: Activity,
         try {executor.execute {try {
             val result=when(action) {
                 "browse"->browse(args)
+                "markOpened"->markOpened(args)
                 "cover"->cover(args)
                 "remove"->removeCopy(args)
                 "cacheSettings"->cacheSettings(args)
+                "userState"->userData.state(args)
+                "userSave"->userData.save(args)
+                "historyRecord"->userData.historyRecord(args)
+                "historyList"->userData.historyList(args)
+                "historyDelete"->userData.historyDelete(args)
+                "historyClear"->userData.historyClear()
+                "historySettings"->userData.historySettings(args)
                 else->error("Unknown storage action")
             };resolve(result)
         }catch(e:Exception) {invoke.reject(e.message?:"Mobile storage operation failed")} finally {if(action=="cover") {obsolete.remove(args.optString("token"));activeCovers.remove(args.optString("token"))}}}} catch(_:java.util.concurrent.RejectedExecutionException) {activeCovers.remove(args.optString("token"));invoke.reject("Storage queue busy")}

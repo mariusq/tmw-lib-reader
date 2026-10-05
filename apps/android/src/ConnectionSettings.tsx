@@ -19,6 +19,6 @@ export default function ConnectionSettings() {
     <button className="control" disabled={busy || !status?.paired} onClick={() => void run("check")}>Check connection</button>
     <button className="control" disabled={busy || !status?.paired} onClick={() => void run("forget")}>Forget connection</button></div>
     <p aria-live="polite">{busy ? "Connecting…" : status?.message}</p>{error && <p role="alert" className="text-red-300">{error}</p>}
-    <p className="text-xs text-slate-400">Catalog and download management follow in Phase 4. Forgetting removes the phone credential; revoke the device in desktop Settings to block access.</p>
+    <p className="text-xs text-slate-400">Forgetting removes the phone credential; revoke the device in desktop Settings to block access.</p>
   </section>;
 }

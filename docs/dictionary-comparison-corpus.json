@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "offsetUnit": "unicode-scalar",
+  "description": "Original synthetic sentences and desired future matches, not observed Yomitan results. DOM cases separately exercise ruby, inline splits and vertical writing.",
+  "cases": [
+    {
+      "id": "compound",
+      "text": "学校生活は楽しい。",
+      "offset": 1,
+      "expectedTerm": "学校生活",
+      "expectedReadings": ["がっこうせいかつ"],
+      "expectedSpan": [0, 4]
+    },
+    {
+      "id": "verb-past",
+      "text": "本を読んだ。",
+      "offset": 2,
+      "expectedTerm": "読む",
+      "expectedReadings": ["よむ"],
+      "expectedSpan": [2, 5]
+    },
+    {
+      "id": "polite-past",
+      "text": "猫を食べました。",
+      "offset": 2,
+      "expectedTerm": "食べる",
+      "expectedReadings": ["たべる"],
+      "expectedSpan": [2, 7]
+    },
+    {
+      "id": "negative-past",
+      "text": "昨日は読まなかった。",
+      "offset": 3,
+      "expectedTerm": "読む",
+      "expectedReadings": ["よむ"],
+      "expectedSpan": [3, 9]
+    },
+    {
+      "id": "contraction",
+      "text": "本を読んじゃった。",
+      "offset": 2,
+      "expectedTerm": "読む",
+      "expectedReadings": ["よむ"],
+      "expectedSpan": [2, 8]
+    },
+    {
+      "id": "adjective-past",
+      "text": "とても高かった。",
+      "offset": 3,
+      "expectedTerm": "高い",
+      "expectedReadings": ["たかい"],
+      "expectedSpan": [3, 7]
+    },
+    {
+      "id": "halfwidth-kana",
+      "text": "ﾈｺがいる。",
+      "offset": 0,
+      "expectedTerm": "ネコ",
+      "expectedReadings": ["ねこ"],
+      "expectedSpan": [0, 2]
+    },
+    {
+      "id": "ambiguous-reading",
+      "text": "生物を見た。",
+      "offset": 0,
+      "expectedTerm": "生物",
+      "expectedReadings": ["せいぶつ", "なまもの"],
+      "expectedSpan": [0, 2]
+    },
+    {
+      "id": "non-bmp-repeat",
+      "text": "😀 猫と猫。",
+      "offset": 4,
+      "expectedTerm": "猫",
+      "expectedReadings": ["ねこ"],
+      "expectedSpan": [4, 5]
+    },
+    {
+      "id": "ruby",
+      "text": "漢字を読む。",
+      "offset": 1,
+      "expectedTerm": "漢字",
+      "expectedReadings": ["かんじ"],
+      "expectedSpan": [0, 2],
+      "html": "<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>を読む。",
+      "selector": "ruby",
+      "nodeIndex": 2,
+      "utf16Offset": 0
+    },
+    {
+      "id": "inline-split",
+      "text": "学校生活。",
+      "offset": 1,
+      "expectedTerm": "学校生活",
+      "expectedReadings": ["がっこうせいかつ"],
+      "expectedSpan": [0, 4],
+      "html": "<span>学</span><b>校</b><em>生活</em>。",
+      "selector": "b",
+      "nodeIndex": 0,
+      "utf16Offset": 0
+    },
+    {
+      "id": "vertical",
+      "text": "漢字を読む。",
+      "offset": 1,
+      "expectedTerm": "漢字",
+      "expectedReadings": ["かんじ"],
+      "expectedSpan": [0, 2],
+      "html": "<span style=\"writing-mode:vertical-rl\">漢字を読む。</span>",
+      "selector": "span",
+      "nodeIndex": 0,
+      "utf16Offset": 1
+    }
+  ]
+}

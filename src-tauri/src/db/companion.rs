@@ -84,6 +84,12 @@ mod protocol_tests {
             .is_ok());
         let backup = temp.path().join("backup.sqlite3");
         db.backup_to(&backup).unwrap();
+        let deleted_id = db.connection.lock().unwrap().query_row("SELECT id FROM books LIMIT 1", [], |row| row.get::<_, i64>(0)).unwrap();
+        let public_id = db.public_id(deleted_id).unwrap();
+        db.remove_book(deleted_id).unwrap();
+        assert!(db.book_details(deleted_id).unwrap().is_none());
+        let deletion_delta = db.catalog_page(cursor(Some(epoch.clone()), None, rev, "".into(), true)).unwrap();
+        assert!(deletion_delta["items"].as_array().unwrap().iter().any(|item| item["id"].as_str() == Some(public_id.as_str()) && item["deleted"] == true));
         db.remove_library_root(root.id).unwrap();
         assert_eq!(
             db.catalog_page(cursor(Some(epoch.clone()), Some(rev), 0, "".into(), false))

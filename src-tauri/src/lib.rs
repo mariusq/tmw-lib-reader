@@ -1,3 +1,4 @@
+mod dictionary_import;
 pub mod companion;
 pub mod db;
 pub mod models;
@@ -20,7 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     models::book::{
         AssignSeriesRequest, BatchTagRequest, BookDetails, BookOverride, BrowseBooksRequest,
-        BrowserBook, CreateCollectionRequest, DictionaryEntry, DictionarySummary, FolderGroup,
+        BrowserBook, CreateCollectionRequest, FolderGroup,
         ReaderBook, ResumeBook, SavePassageRequest, SavedPassage,
     },
     models::library_root::{LibraryRoot, LibraryRootSummary, NewLibraryRoot},
@@ -56,6 +57,12 @@ fn add_library_root(
     let directory = std::path::Path::new(&path);
     if !directory.is_dir() {
         return Err("The selected path is not an accessible folder.".into());
+    }
+    let source = directory.canonicalize().map_err(|e| e.to_string())?;
+    let dictionary_root = app.path().app_data_dir().map_err(|e| e.to_string())?.join("yomitan-v1");
+    let dictionary_root = if dictionary_root.exists() { dictionary_root.canonicalize().map_err(|e| e.to_string())? } else { dictionary_root };
+    if dictionary_root.starts_with(&source) || source.starts_with(&dictionary_root) {
+        return Err("A library folder must be separate from app-managed dictionary storage.".into());
     }
     let cache = cover_cache_directory(&app, &database)?;
     if cache.starts_with(directory) {
@@ -189,9 +196,8 @@ fn cancel_scan(scans: State<'_, ScanController>, scan_id: String) -> bool {
 }
 
 #[tauri::command]
-fn rebuild_search_index(
+async fn rebuild_search_index(
     app: tauri::AppHandle,
-    database: State<'_, db::Database>,
     controller: State<'_, IndexRebuildController>,
     rebuild_id: String,
 ) -> Result<bool, String> {
@@ -203,18 +209,28 @@ fn rebuild_search_index(
         }
         *active = Some((rebuild_id.clone(), cancelled.clone()));
     }
-    let result = database
-        .rebuild_search_index(&cancelled, |(completed, total)| {
-            let _ = app.emit(
-                "search-index-progress",
-                IndexRebuildProgress {
-                    rebuild_id: rebuild_id.clone(),
-                    completed,
-                    total,
-                },
-            );
-        })
-        .map_err(|error| error.to_string());
+    // Synchronous Tauri commands run on the window thread. Keep the entire
+    // transaction (including tokenizer work) off it so progress and Cancel work.
+    let worker_app = app.clone();
+    let worker_id = rebuild_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        worker_app
+            .state::<db::Database>()
+            .rebuild_search_index(&cancelled, |(completed, total)| {
+                let _ = worker_app.emit(
+                    "search-index-progress",
+                    IndexRebuildProgress {
+                        rebuild_id: worker_id.clone(),
+                        completed,
+                        total,
+                    },
+                );
+            })
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Search-index worker failed: {error}"))
+    .and_then(|result| result);
     controller
         .0
         .lock()
@@ -256,6 +272,58 @@ fn remove_library_root(database: State<'_, db::Database>, root_id: i64) -> Resul
     database
         .remove_library_root(root_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_book(app: tauri::AppHandle, book_id: i64, expected_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let database = app.state::<db::Database>();
+        app.state::<ScanController>().while_idle(|| {
+            let details = database.book_details(book_id).map_err(|e| e.to_string())?
+                .ok_or("This book is no longer in the catalog.")?;
+            let source = PathBuf::from(&details.book.file_path);
+            if details.book.file_path != expected_path {
+                return Err("The book path changed. Reopen Book Details before deleting.".into());
+            }
+            let root = database.library_root(details.book.library_root_id).map_err(|e| e.to_string())?
+                .ok_or("The library root is unavailable.")?;
+            let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            let canonical_data = app_data.canonicalize().map_err(|e| e.to_string())?;
+            for library in database.library_roots().map_err(|e| e.to_string())? {
+                if let Ok(library_path) = PathBuf::from(library.root.path).canonicalize() {
+                    if canonical_data.starts_with(library_path) {
+                        return Err("Recovery backups cannot be stored inside a source library.".into());
+                    }
+                }
+            }
+            let backup = app_data
+                .join("backups").join(format!("deleted-book-{book_id}-{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos()));
+            fs::create_dir_all(&backup).map_err(|e| e.to_string())?;
+            database.backup_to(&backup.join("catalog.sqlite3")).map_err(|e| e.to_string())?;
+            match fs::symlink_metadata(&source) {
+                Ok(metadata) => {
+                    if !metadata.is_file() || metadata.file_type().is_symlink()
+                        || !source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub")) {
+                        return Err("Deletion requires a regular EPUB file, not a directory or link.".into());
+                    }
+                    let canonical = source.canonicalize().map_err(|e| e.to_string())?;
+                    let canonical_root = PathBuf::from(root.path).canonicalize().map_err(|e| e.to_string())?;
+                    if !canonical.starts_with(&canonical_root) {
+                        return Err("The EPUB resolves outside its library root.".into());
+                    }
+                    let backup_file = backup.join("book.epub");
+                    fs::copy(&source, &backup_file).map_err(|e| format!("Could not back up EPUB: {e}"))?;
+                    fs::File::open(&backup_file).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+                    fs::remove_file(&source).map_err(|e| format!("Could not delete EPUB: {e}"))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            database.remove_book(book_id).map_err(|e| format!("Catalog removal failed: {e}. Backup: {}", backup.display()))?;
+            Ok(backup.display().to_string())
+        })
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -525,74 +593,21 @@ fn save_reading_location(
         .map_err(|error| error.to_string())
 }
 
-fn dictionary_resource_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-    for packaged in [
-        resource_dir.join("jmdict-eng-3.6.2.json"),
-        resource_dir.join("jmdict-eng/jmdict-eng-3.6.2.json"),
-    ] {
-        if packaged.is_file() {
-            return Ok(packaged);
-        }
-    }
-    let development =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../jmdict-eng/jmdict-eng-3.6.2.json");
-    if development.is_file() {
-        return Ok(development);
-    }
-    Err("The bundled JMdict resource was not found. Reinstall the application or check its resources.".into())
-}
-
-/// Imports only the app-bundled, read-only dictionary; no library or EPUB path is accepted.
-#[tauri::command]
-fn ensure_bundled_dictionary(
-    app: tauri::AppHandle,
-    database: State<'_, db::Database>,
-    rebuild: Option<bool>,
-) -> Result<usize, String> {
-    let path = dictionary_resource_path(&app)?;
-    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
-    let fingerprint = format!(
-        "{}:{}",
-        metadata.len(),
-        metadata
-            .modified()
-            .ok()
-            .and_then(|v| v.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|v| v.as_secs())
-            .unwrap_or_default()
-    );
-    if !rebuild.unwrap_or(false)
-        && database
-            .setting("jmdict_import_version")
-            .map_err(|e| e.to_string())?
-            .as_deref()
-            == Some(&fingerprint)
-    {
-        return Ok(database
-            .dictionaries()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|d| d.name == "JMdict")
-            .map(|d| d.entry_count as usize)
-            .unwrap_or(0));
-    }
-    let entries = services::dictionary::import_jmdict(&path)?;
-    let count = database
-        .replace_jmdict(&path.to_string_lossy(), &entries)
-        .map_err(|e| e.to_string())?;
-    database
-        .set_setting("jmdict_import_version", &fingerprint)
-        .map_err(|e| e.to_string())?;
-    Ok(count)
-}
-
 #[tauri::command]
 fn tokenize_dictionary_target(
     text: String,
     offset: usize,
 ) -> Result<services::readings::DictionaryTarget, String> {
     services::readings::dictionary_target(&text, offset)
+}
+
+#[tauri::command]
+async fn lookup_reader_text(
+    app: tauri::AppHandle,
+    request: tmw_japanese_core::lookup::LookupRequest,
+) -> Result<tmw_japanese_core::chunk_lookup::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || dictionary_import::lookup(&app, &request))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -614,29 +629,12 @@ fn set_app_setting(
 }
 
 #[tauri::command]
-fn list_dictionaries(database: State<'_, db::Database>) -> Result<Vec<DictionarySummary>, String> {
-    database.dictionaries().map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn set_dictionary_enabled(
-    database: State<'_, db::Database>,
-    dictionary_id: i64,
-    enabled: bool,
-) -> Result<(), String> {
-    database
-        .set_dictionary_enabled(dictionary_id, enabled)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn lookup_dictionary(
-    database: State<'_, db::Database>,
+async fn lookup_dictionary(
+    app: tauri::AppHandle,
     query: String,
-) -> Result<Vec<DictionaryEntry>, String> {
-    database
-        .dictionary_lookup(&query)
-        .map_err(|error| error.to_string())
+) -> Result<tmw_japanese_core::chunk_lookup::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || dictionary_import::lookup(&app, &tmw_japanese_core::lookup::LookupRequest { text: query, offset: 0 }))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -837,9 +835,14 @@ pub fn run() {
             app.manage(ScanController::default());
             app.manage(companion::Service::default());
             app.manage(IndexRebuildController::default());
+            app.manage(tmw_japanese_core::dictionary_storage::Jobs::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            dictionary_import::dictionary_import,
+            dictionary_import::dictionary_manage,
+            dictionary_import::dictionary_import_status,
+            dictionary_import::cancel_dictionary_import,
             companion_status,
             companion_enable,
             companion_disable,
@@ -853,6 +856,7 @@ pub fn run() {
             rebuild_search_index,
             cancel_search_index_rebuild,
             remove_library_root,
+            delete_book,
             export_catalog_backup,
             import_catalog_backup,
             choose_cover_cache_folder,
@@ -890,12 +894,10 @@ pub fn run() {
             delete_smart_shelf,
             get_reading_location,
             save_reading_location,
-            ensure_bundled_dictionary,
             tokenize_dictionary_target,
+            lookup_reader_text,
             get_app_setting,
             set_app_setting,
-            list_dictionaries,
-            set_dictionary_enabled,
             lookup_dictionary,
             record_lookup_history,
             list_lookup_history,

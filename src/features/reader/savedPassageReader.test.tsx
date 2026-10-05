@@ -16,7 +16,7 @@ vi.mock("epubjs", () => ({
   default: () => ({
     opened: Promise.resolve(),
     packaging: { metadata: {} },
-    spine: { spineItems: [{ index: 0, linear: "yes" }], get: () => null },
+    spine: { hooks: { content: { register: vi.fn() } }, spineItems: [{ index: 0, linear: "yes" }], get: () => null },
     destroy: vi.fn(),
     renderTo: () => ({
       display: mock.display,
@@ -35,19 +35,18 @@ beforeEach(() => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "get_reader_book") return { id: 1, filePath: "read-only.epub", title: "物語" };
     if (command === "get_reading_location") return null;
-    if (command === "tokenize_dictionary_target")
-      return { surface: "読んだ", lemma: "読む", reading: "よむ" };
-    if (command === "lookup_dictionary")
-      return [
-        {
-          id: 1,
-          term: "読む",
-          reading: "よむ",
-          definitions: ["to read"],
-          partOfSpeech: [],
-          dictionaryName: "JMdict",
-        },
-      ];
+    if (command === "lookup_reader_text" || command === "lookup_dictionary")
+      return {
+        engineVersion: 1,
+        target: { surface: "読んだ", lemma: "読む", reading: "よむ" },
+        matchedSpan: { start: 2, end: 5 },
+        groups: [{ term: "読む", reading: "よむ", matches: [{
+          matchedSpan: { start: 2, end: 5 }, deinflectionDepth: 1,
+          entry: { id: 1, term: "読む", reading: "よむ", glossary: ["to read"],
+            rules: [], definitionTags: [], termTags: [], score: 0, sequence: 1, priority: 0,
+            provenance: { source: "yomitan:JMdict", title: "JMdict", revision: "fixture" } },
+        }] }],
+      };
     if (command === "list_dictionaries") return [];
     return false;
   });
@@ -73,6 +72,9 @@ it("saves the clicked ruby-free sentence and precise CFI in one action", async (
   });
   const save = await screen.findByText("Save passage");
   await screen.findByText("to read");
+  expect(invoke).toHaveBeenCalledWith("lookup_reader_text", {
+    request: { text: "前。本を読んだ。", offset: 5 },
+  });
   fireEvent.click(save);
   await waitFor(() =>
     expect(invoke).toHaveBeenCalledWith("save_passage", {
@@ -88,6 +90,10 @@ it("saves the clicked ruby-free sentence and precise CFI in one action", async (
     }),
   );
   expect(await screen.findByRole("status")).toHaveTextContent("Passage saved");
+  fireEvent.pointerDown(screen.getByLabelText("Offline dictionary"));
+  expect(screen.getByLabelText("Offline dictionary")).toBeInTheDocument();
+  act(() => { source.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
+  expect(screen.queryByLabelText("Offline dictionary")).not.toBeInTheDocument();
 });
 
 it("opens a bookmark anchor instead of the normal resume position", async () => {
@@ -104,7 +110,7 @@ it("opens a bookmark anchor instead of the normal resume position", async () => 
   await waitFor(() => expect(mock.display).toHaveBeenCalledWith("bookmark-cfi"));
 });
 
-it("records one encounter after dictionary fallbacks and leaves manual queries unanchored", async () => {
+it("records one encounter with portable dictionary identity and leaves manual queries unanchored", async () => {
   const source = document.implementation.createHTMLDocument();
   source.body.innerHTML = "<p>本を読んだ。</p>";
   const node = source.querySelector("p")!.firstChild as Text;
@@ -115,8 +121,6 @@ it("records one encounter after dictionary fallbacks and leaves manual queries u
   mock.contents = [{ document: source, cfiFromRange: () => cfi }];
   const original = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation(async (command, args, options) => {
-    if (command === "lookup_dictionary" && (args as { query: string }).query === "読んだ")
-      return [];
     if (command === "record_lookup_history") return 2;
     return original(command, args, options);
   });
@@ -135,20 +139,41 @@ it("records one encounter after dictionary fallbacks and leaves manual queries u
   expect(records()[0][1]).toEqual({
     request: {
       surface: "読んだ",
-      entryId: 1,
+      entryId: null, headword: "読む", reading: "よむ", dictionaryId: "yomitan:JMdict:fixture",
       bookId: 1,
       locationCfi: cfi,
       sentence: "本を読んだ。",
     },
   });
-  fireEvent.click(screen.getByText("Look up"));
   // Query is still the surface form; retry the editable dictionary with a headword.
   const input = screen.getByDisplayValue("読んだ");
   fireEvent.change(input, { target: { value: "読む" } });
   fireEvent.click(screen.getByText("Look up"));
   await waitFor(() => expect(records()).toHaveLength(2));
   expect(records()[1][1]).toEqual({
-    request: { surface: "読む", entryId: 1, bookId: null, locationCfi: "", sentence: "" },
+    request: { surface: "読む", entryId: null, headword: "読む", reading: "よむ", dictionaryId: "yomitan:JMdict:fixture", bookId: null, locationCfi: "", sentence: "" },
   });
   expect(screen.queryByText("Save passage")).not.toBeInTheDocument();
+});
+
+it("shows the import prompt without fallback or history when no source is enabled", async () => {
+  const source = document.implementation.createHTMLDocument();
+  source.body.innerHTML = "<p>本を読んだ。</p>";
+  const range = source.createRange();
+  range.setStart(source.querySelector("p")!.firstChild!, 3);
+  Object.defineProperty(source, "caretRangeFromPoint", { value: () => range });
+  mock.contents = [{ document: source, cfiFromRange: () => "epubcfi(/6/2!/4/2/1:3)" }];
+  const original = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args, options) => {
+    if (command === "lookup_reader_text") throw new Error("Import a local Yomitan dictionary ZIP or enable a dictionary in Manage dictionaries.");
+    return original(command, args, options);
+  });
+  render(<EpubReader bookId={1} onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("record_reader_open", { bookId: 1 }));
+  await act(async () => {
+    mock.listeners.get("rendered")?.();
+    source.querySelector("p")!.dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true }));
+  });
+  expect(await screen.findByText(/Import a local Yomitan dictionary ZIP/)).toBeVisible();
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "lookup_dictionary" || command === "record_lookup_history" || command === "ensure_bundled_dictionary")).toBe(false);
 });

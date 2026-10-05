@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { readingStatuses } from "../features/reader/readingStatuses";
 
-export function ReadingStatus({ bookId, onChanged }: { bookId: number; onChanged?: () => void }) {
+export function ReadingStatus({ bookId, onChanged, compact = false }: { bookId: number; onChanged?: () => void; compact?: boolean }) {
   const [state, setState] = useState<{ status: string; completedAt: number | null }>();
   const [error, setError] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -21,12 +21,13 @@ export function ReadingStatus({ bookId, onChanged }: { bookId: number; onChanged
     };
   }, [bookId]);
   return (
-    <div className="text-sm">
+    <div className={compact ? "reader-status text-sm" : "text-sm"}>
       <label>
-        Reading status{" "}
+        <span className={compact ? "sr-only" : undefined}>Reading status</span>{" "}
         <select
           aria-label="Reading status"
-          className="control mt-1"
+          title="Reading status"
+          className={compact ? "reader-control" : "control mt-1"}
           disabled={!state || saving}
           value={state?.status ?? "unset"}
           onChange={async (event) => {

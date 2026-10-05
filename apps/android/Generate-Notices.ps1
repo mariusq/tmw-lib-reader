@@ -37,7 +37,10 @@ try {
     }
     [void]$text.AppendLine((Get-Content '../../docs/android/lindera-license.txt' -Raw))
     [void]$text.AppendLine((Get-Content '../../docs/android/jmdict-export-license.txt' -Raw))
+    [void]$text.AppendLine("`n--- Yomitan Japanese language transforms [GPL-3.0-or-later] ---")
+    [void]$text.AppendLine((Get-Content '../../crates/japanese-core/vendor/yomitan/NOTICE.txt' -Raw -Encoding UTF8))
+    [void]$text.AppendLine((Get-Content '../../crates/japanese-core/vendor/yomitan/LICENSE' -Raw -Encoding UTF8))
     [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'src/notices.txt'), $text.ToString())
-    [IO.File]::WriteAllText((Join-Path $PSScriptRoot '../../docs/android/rust-licenses.md'), ($inventory -join "`n") + "`n")
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot '../../docs/android/rust-licenses.txt'), ($inventory -join "`n") + "`n")
 } finally { Pop-Location }
 

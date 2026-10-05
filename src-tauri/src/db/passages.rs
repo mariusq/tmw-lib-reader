@@ -15,8 +15,8 @@ impl Database {
         let connection = self.connection.lock().expect("database mutex poisoned");
         // A duplicate save reuses the bookmark without discarding an edited note/context.
         connection.query_row(
-            "INSERT INTO saved_passages(book_id,surface,headword,reading,sentence,note,location_cfi,source_size,source_modified,created_at)
-             SELECT id,?2,?3,?4,?5,?6,?7,file_size,modified_time,?8 FROM books WHERE id=?1
+            "INSERT INTO saved_passages(book_id,surface,headword,reading,sentence,note,location_cfi,source_size,source_modified,created_at,content_version)
+             SELECT id,?2,?3,?4,?5,?6,?7,file_size,modified_time,?8,(SELECT version FROM companion_content_versions WHERE book_id=books.id AND source_size=books.file_size AND source_modified=books.modified_time) FROM books WHERE id=?1
              ON CONFLICT(book_id,location_cfi,surface) DO UPDATE SET surface=excluded.surface RETURNING id",
             params![request.book_id, request.surface, request.headword, request.reading, request.sentence, request.note, request.location_cfi, unix_timestamp()],
             |row| row.get(0),
@@ -78,6 +78,8 @@ impl Database {
     }
 
     pub fn passage_location(&self, id: i64) -> Result<String, String> {
+        let valid:bool=self.connection.lock().expect("database mutex poisoned").query_row("SELECT p.content_version IS NULL OR EXISTS(SELECT 1 FROM companion_content_versions v JOIN books b ON b.id=v.book_id WHERE v.book_id=p.book_id AND v.version=p.content_version AND v.source_size=b.file_size AND v.source_modified=b.modified_time) FROM saved_passages p WHERE p.id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        if !valid {return Err("The source EPUB has changed. The old anchor may be invalid; use the saved excerpt to find the passage.".into())}
         let (path,cfi,size,modified): (String,String,i64,i64) = self.connection.lock().expect("database mutex poisoned")
             .query_row("SELECT b.file_path,p.location_cfi,p.source_size,p.source_modified FROM saved_passages p JOIN books b ON b.id=p.book_id WHERE p.id=?1", [id],
                 |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(|e| e.to_string())?;
@@ -288,6 +290,7 @@ mod tests {
                 },
             )
             .unwrap();
+        super::user_sync::remove_test_schema(&database.connection.lock().unwrap());
         database
             .connection
             .lock()
@@ -317,6 +320,6 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 18);
     }
 }

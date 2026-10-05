@@ -24,6 +24,72 @@ pub struct ImportedEntry {
     pub part_of_speech: Vec<String>,
 }
 
+/// Shared import boundary. These are untrusted data, never renderable HTML.
+/// Validation/sanitization and supported-feature reporting belong to the importer.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictionaryManifest {
+    pub title: String,
+    pub revision: String,
+    pub format: u32,
+    pub sequenced: bool,
+    pub attribution: Option<String>,
+    /// Original index metadata, including publisher/source notices. Untrusted data.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TermRecord {
+    pub term: String,
+    pub reading: String,
+    pub definition_tags: Vec<String>,
+    pub rules: Vec<String>,
+    pub score: f64,
+    pub glossary: Vec<serde_json::Value>,
+    pub sequence: i64,
+    pub term_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagRecord {
+    pub name: String,
+    pub category: String,
+    pub order: f64,
+    pub notes: String,
+    pub score: f64,
+}
+
+/// A platform creates an isolated staging sink from a validated manifest.
+/// Batches are bounded by the shared importer; publication happens only
+/// after archive/schema/asset validation. Drop without publish must discard staging
+/// without touching an existing usable dictionary. No source path is accepted.
+/// Source adapters will provide a Read + Seek archive (Android managed temp copy).
+/// Asset staging and cancellation checks are specified in docs/dictionary-improvements.md.
+/// Implemented by the isolated SQLite sink in dictionary_storage (format 3).
+pub trait DictionaryImportSink: Sized {
+    fn write_metadata(
+        &mut self,
+        _rows: &[(String, String, serde_json::Value)],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn write_terms(&mut self, terms: &[TermRecord]) -> Result<(), String>;
+    fn write_tags(&mut self, tags: &[TagRecord]) -> Result<(), String>;
+    /// Importer supplies a validated relative path and a bounded asset stream.
+    fn stage_asset(
+        &mut self,
+        archive_path: &str,
+        bytes: &mut dyn std::io::Read,
+    ) -> Result<(), String>;
+    fn publish(self) -> Result<(), String>;
+    fn write_warnings(&mut self, _warnings: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 struct DictionaryFile {
     #[serde(default)]

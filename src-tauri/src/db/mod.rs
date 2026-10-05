@@ -1,6 +1,8 @@
 pub(crate) mod companion;
+pub(crate) mod user_sync;
 pub mod history;
 mod passages;
+mod duplicates;
 pub mod shelves;
 
 use std::{
@@ -61,6 +63,7 @@ impl Database {
         }
         let mut connection = Connection::open(path)?;
         configure_connection(&connection)?;
+        duplicates::initialize(&mut connection)?;
         let search_schema_changed = run_migrations(&mut connection)?;
         if search_schema_changed || !search_index_is_complete(&connection)? {
             rebuild_search_index(&mut connection, None, |_| {})?;
@@ -117,6 +120,19 @@ impl Database {
     pub fn remove_library_root(&self, id: i64) -> rusqlite::Result<bool> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         Ok(connection.execute("DELETE FROM library_roots WHERE id = ?1", [id])? > 0)
+    }
+
+    pub fn remove_book(&self, id: i64) -> rusqlite::Result<()> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        // Record the public identity before foreign-key cascades remove it.
+        transaction.execute("UPDATE companion_revision SET revision=revision+1", [])?;
+        transaction.execute("INSERT INTO companion_changes SELECT public_id,(SELECT revision FROM companion_revision) FROM companion_books WHERE book_id=?1 ON CONFLICT(public_id) DO UPDATE SET revision=excluded.revision", [id])?;
+        // Passage delete triggers need the identity too, so run them before deleting books.
+        transaction.execute("DELETE FROM saved_passages WHERE book_id=?1", [id])?;
+        transaction.execute("DELETE FROM book_search_fts WHERE book_id=?1", [id])?;
+        transaction.execute("DELETE FROM books WHERE id=?1", [id])?;
+        transaction.commit()
     }
 
     /// Marks catalog rows whose source vanished, retaining metadata, overrides,
@@ -439,7 +455,7 @@ impl Database {
         let connection = self.connection.lock().expect("database mutex poisoned");
         connection
             .query_row(
-                "SELECT location_cfi FROM reading_progress WHERE book_id=?1",
+                "SELECT p.location_cfi FROM reading_progress p JOIN books b ON b.id=p.book_id WHERE p.book_id=?1 AND (p.content_version IS NULL OR EXISTS(SELECT 1 FROM companion_content_versions v WHERE v.book_id=p.book_id AND v.version=p.content_version AND v.source_size=b.file_size AND v.source_modified=b.modified_time))",
                 [id],
                 |row| row.get(0),
             )
@@ -448,7 +464,7 @@ impl Database {
 
     pub fn save_reading_location(&self, id: i64, location_cfi: &str) -> rusqlite::Result<()> {
         let connection = self.connection.lock().expect("database mutex poisoned");
-        connection.execute("INSERT INTO reading_progress(book_id,location_cfi,updated_at) VALUES(?1,?2,?3) ON CONFLICT(book_id) DO UPDATE SET location_cfi=excluded.location_cfi, updated_at=excluded.updated_at", params![id, location_cfi, unix_timestamp()])?;
+        connection.execute("INSERT INTO reading_progress(book_id,location_cfi,updated_at,content_version) VALUES(?1,?2,?3,(SELECT v.version FROM companion_content_versions v JOIN books b ON b.id=v.book_id WHERE b.id=?1 AND v.source_size=b.file_size AND v.source_modified=b.modified_time)) ON CONFLICT(book_id) DO UPDATE SET location_cfi=excluded.location_cfi, updated_at=excluded.updated_at,content_version=excluded.content_version", params![id, location_cfi, unix_timestamp()])?;
         Ok(())
     }
 
@@ -703,7 +719,7 @@ impl Database {
         let connection = self.connection.lock().expect("database mutex poisoned");
         shelves::validate_filter(request)?;
         let query = normalize_for_search(&request.query);
-        let romaji_query = normalize_romaji(&request.query);
+        let romaji_query = normalize_romaji(&request.query).replace(' ', "");
         let sort = match request.sort.as_str() {
             "author" => "effective_creator COLLATE NOCASE, effective_title COLLATE NOCASE",
             "series" => "effective_series COLLATE NOCASE, effective_volume COLLATE NOCASE, effective_title COLLATE NOCASE",
@@ -727,24 +743,33 @@ impl Database {
         } else {
             ""
         };
-        // Duplicate collapsing intentionally uses only the normalized effective
-        // title. Keep the earliest catalog row as a stable representative.
-        // Overrides are already represented in this derived document, so a
-        // user's correction takes effect immediately without guessing at text.
-        let duplicate_predicate = if request.hide_duplicate_titles {
-            "AND (d.title_normalized='' OR NOT EXISTS (SELECT 1 FROM book_search_documents earlier WHERE earlier.book_id<b.id AND lower(earlier.title_normalized)=lower(d.title_normalized)))"
-        } else {
-            ""
+        let candidate_predicate = match request.duplicate_filtering.as_deref() {
+            Some("off") => "",
+            Some("high") => duplicates::HIGH_PREDICATE,
+            Some("all") => duplicates::ALL_PREDICATE,
+            Some(_) => return Err(rusqlite::Error::InvalidParameterName("duplicateFiltering".into())),
+            None if request.hide_duplicate_titles => duplicates::HIGH_PREDICATE,
+            None => "",
         };
+        // Exact-title collapsing also covers books absent from the candidate file.
+        // Consider only candidate survivors so the two filters cannot hide each
+        // other's representative (for example when an older copy is unavailable).
+        let earlier_candidate_predicate = candidate_predicate.replace("b.", "earlier_book.");
+        let title_predicate = if request.hide_duplicate_titles
+            && request.duplicate_filtering.as_deref() != Some("off")
+        {
+            format!("AND (d.title_normalized='' OR NOT EXISTS (SELECT 1 FROM book_search_documents earlier JOIN books earlier_book ON earlier_book.id=earlier.book_id WHERE earlier.book_id<b.id AND lower(earlier.title_normalized)=lower(d.title_normalized) {earlier_candidate_predicate}))")
+        } else { String::new() };
+        let duplicate_predicate = format!("{candidate_predicate} {title_predicate}");
         let search_predicate = if use_fts {
             ""
         } else {
-            "AND (?5='' OR instr(d.title_normalized, ?5)>0 OR instr(d.creator_normalized, ?5)>0 OR instr(d.series_normalized, ?5)>0 OR instr(d.file_name_normalized, ?5)>0 OR instr(d.parent_folder_normalized, ?5)>0 OR instr(d.tags_normalized, ?5)>0 OR instr(d.title_reading, ?5)>0 OR instr(d.creator_reading, ?5)>0 OR instr(d.series_reading, ?5)>0 OR instr(d.file_name_reading, ?5)>0 OR instr(d.aliases_normalized, ?5)>0 OR instr(d.title_romaji, ?6)>0 OR instr(d.creator_romaji, ?6)>0 OR instr(d.series_romaji, ?6)>0 OR instr(d.file_name_romaji, ?6)>0 OR instr(d.aliases_romaji, ?6)>0)"
+            "AND (?5='' OR instr(d.title_normalized, ?5)>0 OR instr(d.creator_normalized, ?5)>0 OR instr(d.series_normalized, ?5)>0 OR instr(d.file_name_normalized, ?5)>0 OR instr(d.parent_folder_normalized, ?5)>0 OR instr(d.tags_normalized, ?5)>0 OR instr(d.title_reading, ?5)>0 OR instr(d.creator_reading, ?5)>0 OR instr(d.series_reading, ?5)>0 OR instr(d.file_name_reading, ?5)>0 OR instr(d.aliases_normalized, ?5)>0 OR instr(replace(d.title_romaji, ' ', ''), ?6)>0 OR instr(replace(d.creator_romaji, ' ', ''), ?6)>0 OR instr(replace(d.series_romaji, ' ', ''), ?6)>0 OR instr(replace(d.file_name_romaji, ' ', ''), ?6)>0 OR instr(replace(d.aliases_romaji, ' ', ''), ?6)>0)"
         };
         let rank_order = if query.is_empty() {
             ""
         } else {
-            "CASE WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized=?5 THEN 0 WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized LIKE ?5 || '%' THEN 1 WHEN d.title_reading=?5 OR d.title_romaji=?6 THEN 2 WHEN d.title_reading LIKE ?5 || '%' OR d.title_romaji LIKE ?6 || '%' THEN 3 WHEN d.title_romaji LIKE '%' || ?6 || '%' THEN 4 ELSE 5 END, "
+            "CASE WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized=?5 THEN 0 WHEN (NULLIF(o.title,'') IS NOT NULL OR NULLIF(b.discovered_title,'') IS NOT NULL) AND d.title_normalized LIKE ?5 || '%' THEN 1 WHEN d.title_reading=?5 OR replace(d.title_romaji, ' ', '')=?6 THEN 2 WHEN d.title_reading LIKE ?5 || '%' OR replace(d.title_romaji, ' ', '') LIKE ?6 || '%' THEN 3 WHEN replace(d.title_romaji, ' ', '') LIKE '%' || ?6 || '%' THEN 4 ELSE 5 END, "
         };
         let status_predicate = if request.reading_status.is_some() {
             "b.reading_status=?9"
@@ -1056,6 +1081,24 @@ fn run_migrations(connection: &mut Connection) -> rusqlite::Result<bool> {
         transaction.pragma_update(None, "user_version", 16)?;
         transaction.commit()?;
     }
+    if version < 17 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/017_user_sync.sql"))?;
+        transaction.pragma_update(None, "user_version", 17)?;
+        transaction.commit()?;
+    }
+    if version < 18 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/018_lookup_sync.sql"))?;
+        transaction.pragma_update(None, "user_version", 18)?;
+        transaction.commit()?;
+    }
+    if version < 19 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/019_romaji_spacing.sql"))?;
+        transaction.pragma_update(None, "user_version", 19)?;
+        transaction.commit()?;
+    }
     Ok(version < 8)
 }
 
@@ -1142,8 +1185,14 @@ fn refresh_search_document_inner(connection: &Connection, book_id: i64) -> rusql
     let aliases_romaji = normalize_romaji(&row.7);
     connection.execute("INSERT INTO book_search_documents(book_id,title_normalized,creator_normalized,series_normalized,file_name_normalized,parent_folder_normalized,tags_normalized,title_reading,creator_reading,series_reading,file_name_reading,aliases_normalized,title_romaji,creator_romaji,series_romaji,file_name_romaji,aliases_romaji) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17) ON CONFLICT(book_id) DO UPDATE SET title_normalized=excluded.title_normalized,creator_normalized=excluded.creator_normalized,series_normalized=excluded.series_normalized,file_name_normalized=excluded.file_name_normalized,parent_folder_normalized=excluded.parent_folder_normalized,tags_normalized=excluded.tags_normalized,title_reading=excluded.title_reading,creator_reading=excluded.creator_reading,series_reading=excluded.series_reading,file_name_reading=excluded.file_name_reading,aliases_normalized=excluded.aliases_normalized,title_romaji=excluded.title_romaji,creator_romaji=excluded.creator_romaji,series_romaji=excluded.series_romaji,file_name_romaji=excluded.file_name_romaji,aliases_romaji=excluded.aliases_romaji", params![book_id,n[0],n[1],n[2],n[3],n[4],n[5],title_reading,creator_reading,series_reading,file_name_reading,aliases,title_romaji,creator_romaji,series_romaji,file_name_romaji,aliases_romaji])?;
     connection.execute("DELETE FROM book_search_fts WHERE book_id=?1", [book_id])?;
-    connection.execute("INSERT INTO book_search_fts(book_id,title,creator,series,file_name,parent_folder,tags,title_reading,creator_reading,series_reading,file_name_reading,aliases,title_romaji,creator_romaji,series_romaji,file_name_romaji,aliases_romaji) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)", params![book_id,n[0],n[1],n[2],n[3],n[4],n[5],title_reading,creator_reading,series_reading,file_name_reading,aliases,title_romaji,creator_romaji,series_romaji,file_name_romaji,aliases_romaji])?;
+    connection.execute("INSERT INTO book_search_fts(book_id,title,creator,series,file_name,parent_folder,tags,title_reading,creator_reading,series_reading,file_name_reading,aliases,title_romaji,creator_romaji,series_romaji,file_name_romaji,aliases_romaji) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)", params![book_id,n[0],n[1],n[2],n[3],n[4],n[5],title_reading,creator_reading,series_reading,file_name_reading,aliases,romaji_search_variants(&title_romaji),romaji_search_variants(&creator_romaji),romaji_search_variants(&series_romaji),romaji_search_variants(&file_name_romaji),romaji_search_variants(&aliases_romaji)])?;
     Ok(())
+}
+
+// Keep readable token spacing and an additional contiguous spelling in FTS.
+fn romaji_search_variants(value: &str) -> String {
+    let compact = value.replace(' ', "");
+    if compact == value { value.to_owned() } else { format!("{value} {compact}") }
 }
 
 fn nonempty(value: &Option<String>) -> Option<String> {
@@ -1267,7 +1316,7 @@ mod tests {
                 tag_id: None,
                 collection_id: None,
                 needs_metadata: false,
-                hide_duplicate_titles: false,
+                hide_duplicate_titles: false, duplicate_filtering: None,
                 query: String::new(),
                 sort: "title".into(),
                 offset: 0,
@@ -1392,7 +1441,7 @@ mod tests {
                     tag_id: None,
                     collection_id: None,
                     needs_metadata: false,
-                    hide_duplicate_titles: false,
+                    hide_duplicate_titles: false, duplicate_filtering: None,
                     query: query.into(),
                     sort: sort.into(),
                     offset,
@@ -1497,7 +1546,7 @@ mod tests {
         let foreign_keys: i64 = connection
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 18);
         assert_eq!(foreign_keys, 1);
         assert!(connection
             .query_row(
@@ -1711,6 +1760,53 @@ mod tests {
             .set_dictionary_enabled(dictionary.id, false)
             .unwrap();
         assert!(database.dictionary_lookup("猫").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dictionary_phase1_corpus_preserves_legacy_results() {
+        use tmw_japanese_core::lookup::{lookup_text, LookupRequest};
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("catalog.sqlite3")).unwrap();
+        let forms = [
+            ("学校", "がっこう"), ("学校生活", "がっこうせいかつ"),
+            ("読む", "よむ"), ("食べる", "たべる"), ("高い", "たかい"),
+            ("ネコ", "ねこ"), ("猫", "ねこ"), ("生物", "せいぶつ"),
+            ("生物", "なまもの"), ("漢字", "かんじ"),
+        ];
+        let source = serde_json::json!({ "words": forms.iter().map(|(term, reading)| {
+            serde_json::json!({ "kanji": [{"text": term}], "kana": [{"text": reading}],
+                "sense": [{"gloss": [{"lang": "eng", "text": "original synthetic fixture"}]}] })
+        }).collect::<Vec<_>>() });
+        let path = directory.path().join("generated-jmdict.json");
+        std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let entries = crate::services::dictionary::import_jmdict(&path).unwrap();
+        database.replace_jmdict("generated fixture", &entries).unwrap();
+        println!("Synthetic import: {} forms, {:.2} ms including transactional insert", entries.len(), started.elapsed().as_secs_f64() * 1000.0);
+        let corpus: serde_json::Value = serde_json::from_str(include_str!("../../../docs/dictionary-comparison-corpus.json")).unwrap();
+        for row in corpus["cases"].as_array().unwrap() {
+            let request = LookupRequest { text: row["text"].as_str().unwrap().into(), offset: row["offset"].as_u64().unwrap() as usize };
+            let target = crate::services::readings::dictionary_target(&request.text, request.offset).unwrap();
+            // Independent pre-extraction sequence is the compatibility oracle.
+            let mut legacy = database.dictionary_lookup(&target.surface).unwrap();
+            if legacy.is_empty() && target.lemma != target.surface {
+                legacy = database.dictionary_lookup(&target.lemma).unwrap();
+            }
+            if legacy.is_empty() {
+                if let Some(reading) = &target.reading { legacy = database.dictionary_lookup(reading).unwrap(); }
+            }
+            let result = lookup_text(&request, &mut |value: &str| database.dictionary_lookup(value).map_err(|e| e.to_string())).unwrap();
+            assert_eq!(serde_json::to_value(&result.entries).unwrap(), serde_json::to_value(&legacy).unwrap(), "{}", row["id"]);
+            let surface: String = request.text.chars().skip(result.matched_span.start).take(result.matched_span.end - result.matched_span.start).collect();
+            assert_eq!(surface, result.target.surface);
+            println!("{}", serde_json::json!({"id": row["id"], "surface": result.target.surface,
+                "lemma": result.target.lemma, "span": [result.matched_span.start, result.matched_span.end],
+                "ranking": result.entries.iter().map(|e| (&e.term, &e.reading)).collect::<Vec<_>>() }));
+        }
+        let dictionary = database.dictionaries().unwrap().remove(0);
+        database.set_dictionary_enabled(dictionary.id, false).unwrap();
+        let result = lookup_text(&LookupRequest { text: "猫".into(), offset: 0 }, &mut |value: &str| database.dictionary_lookup(value).map_err(|e| e.to_string())).unwrap();
+        assert!(result.entries.is_empty());
     }
 
     #[test]
@@ -2043,7 +2139,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: false,
+            hide_duplicate_titles: false, duplicate_filtering: None,
             query: query.into(),
             sort: "title".into(),
             offset: 0,
@@ -2104,7 +2200,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: false,
+            hide_duplicate_titles: false, duplicate_filtering: None,
             query: query.into(),
             sort: "title".into(),
             offset: 0,
@@ -2118,6 +2214,36 @@ mod tests {
             title.id
         );
         assert_ne!(other.id, title.id);
+    }
+
+    #[test]
+    fn romaji_spacing_matches_existing_and_rebuilt_indexes() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("catalog.sqlite3")).unwrap();
+        let root = database.add_library_root(NewLibraryRoot { path: r"C:\fixture", display_name: "Fixture" }).unwrap();
+        for (index, title) in ["好きな子のいもうと", "好きな子のいもうと２", "好きな子のいもうと３"].iter().enumerate() {
+            let name = format!("fixture{index}.epub");
+            let book = database.add_book(NewBook { library_root_id: root.id, file_path: &format!(r"C:\fixture\{name}"), parent_folder_path: r"C:\fixture", file_name: &name, file_size: 1, modified_time: 1 }).unwrap();
+            database.save_extracted_metadata(book.id, &ExtractedBookMetadata { title: Some((*title).into()), ..Default::default() }).unwrap();
+            database.save_reading_override(book.id, Some("すき な こ の いもうと"), None).unwrap();
+        }
+        let check = || {
+            for query in ["sukinako", "suki na ko", "su ki na ko", "SUKI-NA_KO", "su", "好きな子", "sukinakonoimouto"] {
+                let request = BrowseBooksRequest { reading_status: None, library_root_id: None, tag_id: None, collection_id: None, needs_metadata: false, hide_duplicate_titles: false, duplicate_filtering: None, query: query.into(), sort: "title".into(), offset: 0, limit: 20 };
+                assert_eq!(database.browse_books(&request).unwrap().len(), 3, "{query}");
+            }
+        };
+        check();
+        // Emulate a version-18 index and check the one-time backfill.
+        {
+            let mut connection = database.connection.lock().unwrap();
+            connection.execute("UPDATE book_search_fts SET title_romaji='suki na ko no imouto'", []).unwrap();
+            connection.pragma_update(None, "user_version", 18).unwrap();
+            run_migrations(&mut connection).unwrap();
+        }
+        check();
+        assert!(database.rebuild_search_index(&AtomicBool::new(false), |_| {}).unwrap());
+        check();
     }
 
     #[test]
@@ -2169,7 +2295,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: true,
+            hide_duplicate_titles: true, duplicate_filtering: None,
             query: String::new(),
             sort: "folder".into(),
             offset: 0,
@@ -2196,6 +2322,24 @@ mod tests {
             after.iter().map(|book| book.id).collect::<Vec<_>>(),
             vec![ids[0], ids[3]]
         );
+        // These generated paths are absent from the JSON: exact-title hiding
+        // must still apply with either Settings confidence level.
+        let mut request = request;
+        for mode in ["high", "all"] {
+            request.duplicate_filtering = Some(mode.into());
+            assert_eq!(database.browse_books(&request).unwrap().iter().map(|book| book.id).collect::<Vec<_>>(), vec![ids[0], ids[3]]);
+        }
+        request.duplicate_filtering = Some("off".into());
+        assert_eq!(database.browse_books(&request).unwrap().len(), 4);
+        // A candidate group's available survivor must not be suppressed by
+        // its older unavailable exact-title twin.
+        {
+            let connection = database.connection.lock().unwrap();
+            connection.execute("INSERT INTO duplicate_candidates SELECT file_path,99999,1 FROM books WHERE id IN (?1,?2)", params![ids[0], ids[1]]).unwrap();
+            connection.execute("UPDATE books SET extraction_status='unavailable' WHERE id=?1", [ids[0]]).unwrap();
+        }
+        request.duplicate_filtering = Some("high".into());
+        assert_eq!(database.browse_books(&request).unwrap().iter().map(|book| book.id).collect::<Vec<_>>(), vec![ids[1], ids[3]]);
     }
 
     #[test]
@@ -2245,7 +2389,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: true,
+            hide_duplicate_titles: true, duplicate_filtering: None,
             query: String::new(),
             sort: "title".into(),
             offset: 0,
@@ -2355,7 +2499,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: false,
+            hide_duplicate_titles: false, duplicate_filtering: None,
             query: query.into(),
             sort: "title".into(),
             offset: 0,

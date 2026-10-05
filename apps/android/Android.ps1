@@ -35,6 +35,18 @@ try {
             & cargo tauri android init --ci --skip-targets-install
         }
         'Build' {
+            if ($TestSigning) {
+                # This development key is the established personal-use update identity.
+                # Fail BEFORE Gradle can generate a replacement if it is missing.
+                $updateKey = Join-Path $env:USERPROFILE '.android/debug.keystore'
+                if (-not (Test-Path -LiteralPath $updateKey)) { throw 'Existing update key missing. Restore its secure backup; do not generate a new key.' }
+                $certificateFile = Join-Path $env:TEMP ('tmw-update-cert-' + [Guid]::NewGuid().ToString() + '.der')
+                try {
+                    & "$env:JAVA_HOME/bin/keytool.exe" -exportcert -keystore $updateKey -alias androiddebugkey -storepass android -file $certificateFile
+                    if ($LASTEXITCODE -ne 0) { throw 'Cannot verify existing update signing key.' }
+                    if ((Get-FileHash -LiteralPath $certificateFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne '606342f7138cbc6eaee5b672b9d9961cc9ca70d2e3f4eacb53cbd4a47f543ca8') { throw 'Signing identity differs from installed personal-use app. Restore the original key.' }
+                } finally { if (Test-Path -LiteralPath $certificateFile) { Remove-Item -LiteralPath $certificateFile } }
+            }
             $dictionarySource = Join-Path $PSScriptRoot '../../jmdict-eng/jmdict-eng-3.6.2.json'
             if ((Get-FileHash -LiteralPath $dictionarySource -Algorithm SHA256).Hash.ToLowerInvariant() -ne '5f54504a62a7f45741e1bf6fd28f6e1e5add6405f2829748cc004a802839a3aa') { throw 'Unexpected dictionary source; update the version and provenance deliberately.' }
             & cargo run --offline --release --manifest-path ../../crates/dictionary-build/Cargo.toml -- ../../jmdict-eng/jmdict-eng-3.6.2.json src-tauri/assets/jmdict-20260928-v2.sqlite3

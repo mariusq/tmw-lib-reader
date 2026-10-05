@@ -19,6 +19,19 @@ pub struct DictionaryTarget {
 /// Finds the IPADIC token containing a character offset in a small EPUB text window.
 /// This is assistive only: errors are returned so the UI can use its plain-text fallback.
 pub fn dictionary_target(text: &str, offset: usize) -> Result<DictionaryTarget, String> {
+    dictionary_target_with_span(text, offset).map(|(target, _, _)| target)
+}
+
+/// Returns the target and its original Unicode scalar start/end (end exclusive).
+pub fn dictionary_target_with_span(
+    text: &str,
+    offset: usize,
+) -> Result<(DictionaryTarget, usize, usize), String> {
+    let clicked_byte = text
+        .char_indices()
+        .nth(offset)
+        .map(|(byte, _)| byte)
+        .ok_or_else(|| "No dictionary token was found at that position.".to_string())?;
     let analyzer = ANALYZER
         .get_or_init(|| {
             load_dictionary("embedded://ipadic")
@@ -31,10 +44,12 @@ pub fn dictionary_target(text: &str, offset: usize) -> Result<DictionaryTarget, 
         .segment(Cow::Borrowed(text))
         .map_err(|e| e.to_string())?
     {
-        let surface = token.surface.to_string();
-        let start = text[..token.byte_start].chars().count();
-        let end = text[..token.byte_end].chars().count();
-        if offset >= start && offset < end {
+        if clicked_byte >= token.byte_start && clicked_byte < token.byte_end {
+            // Count the original prefix once for the selected token, rather than
+            // recounting it for every earlier token in the window.
+            let start = text[..token.byte_start].chars().count();
+            let end = start + text[token.byte_start..token.byte_end].chars().count();
+            let surface = token.surface.to_string();
             let details = token.details();
             let lemma = details
                 .get(6)
@@ -45,11 +60,15 @@ pub fn dictionary_target(text: &str, offset: usize) -> Result<DictionaryTarget, 
                 .get(7)
                 .filter(|v| **v != "*")
                 .map(|v| (*v).to_string());
-            return Ok(DictionaryTarget {
-                surface,
-                lemma,
-                reading,
-            });
+            return Ok((
+                DictionaryTarget {
+                    surface,
+                    lemma,
+                    reading,
+                },
+                start,
+                end,
+            ));
         }
     }
     Err("No dictionary token was found at that position.".into())

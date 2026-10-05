@@ -1,0 +1,215 @@
+{
+  "sourceCommit": "77e200428902abf4fa48284df92da7af3dcb4162",
+  "cases": [
+    {
+      "text": "死んじゃえ",
+      "term": "死ぬ",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "信じらんない",
+      "term": "信じる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "信っじらんない",
+      "term": "信じる",
+      "pos": "v1",
+      "matched": false,
+      "depth": null
+    },
+    {
+      "text": "読んじゃった",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "食べさせられました",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 4
+    },
+    {
+      "text": "食べている",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "高くなかった",
+      "term": "高い",
+      "pos": "adj-i",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "読まなかった",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "行った",
+      "term": "行く",
+      "pos": "v5",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "来ました",
+      "term": "来る",
+      "pos": "vk",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "勉強しました",
+      "term": "勉強する",
+      "pos": "vs",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "書け",
+      "term": "書く",
+      "pos": "v5",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "食べろ",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "読んどいた",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "食べちゃえ",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "わかんない",
+      "term": "わかる",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "食べらんない",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "高ければ",
+      "term": "高い",
+      "pos": "adj-i",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "読めば",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "読もう",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "食べよう",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "読まれた",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "読ませた",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 2
+    },
+    {
+      "text": "読める",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "食べませんでした",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "読んでしまった",
+      "term": "読む",
+      "pos": "v5",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "せん",
+      "term": "する",
+      "pos": "vs",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "持ってこい",
+      "term": "持ってくる",
+      "pos": "vk",
+      "matched": true,
+      "depth": 1
+    },
+    {
+      "text": "しなきゃ",
+      "term": "する",
+      "pos": "vs",
+      "matched": true,
+      "depth": 3
+    },
+    {
+      "text": "食べへん",
+      "term": "食べる",
+      "pos": "v1",
+      "matched": true,
+      "depth": 2
+    }
+  ]
+}

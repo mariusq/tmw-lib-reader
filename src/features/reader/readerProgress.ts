@@ -1,20 +1,11 @@
-export type ProgressLocation = {
-  start?: { index: number; displayed: { page: number; total: number } };
-  atStart?: boolean;
-  atEnd?: boolean;
-};
+export type ProgressLocation = { start?: { cfi?: string } };
+export type CharacterLocations = { percentageFromCfi: (cfi: string) => number | null };
 
-// Equal weight per reading-order section avoids loading off-screen chapters.
-// This is an estimate: chapters can differ considerably in length.
-export function readerProgress(location: ProgressLocation, sectionIndices: number[]): number | null {
-  const start = location.start;
-  if (!start || sectionIndices.length === 0) return null;
-  const section = sectionIndices.indexOf(start.index);
-  if (section < 0) return null;
-  if (location.atEnd) return 100;
-  if (location.atStart) return 0;
-  const { page, total } = start.displayed;
-  if (!Number.isFinite(page) || !Number.isFinite(total) || total <= 0) return null;
-  const fraction = Math.max(0, Math.min(1, (page - 1) / total));
-  return Math.min(99.9, Math.max(0, 100 * (section + fraction) / sectionIndices.length));
+// Use character positions across the whole reading order, independent of pagination.
+export function readerProgress(location: ProgressLocation, locations: CharacterLocations): number | null {
+  const cfi = location.start?.cfi;
+  if (!cfi) return null;
+  const fraction = locations.percentageFromCfi(cfi);
+  if (fraction === null || !Number.isFinite(fraction)) return null;
+  return Math.max(0, Math.min(100, fraction * 100));
 }

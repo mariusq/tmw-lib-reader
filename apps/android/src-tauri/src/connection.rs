@@ -3,6 +3,20 @@ use serde_json::Value;
 use tauri::Manager;
 #[cfg(target_os = "android")]
 struct Native(tauri::plugin::PluginHandle<tauri::Wry>);
+
+pub fn dictionary_document(app: &tauri::AppHandle, cancel: bool) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    return app
+        .state::<Native>()
+        .0
+        .run_mobile_plugin("dictionaryDocument", serde_json::json!({"cancel": cancel}))
+        .map_err(|e| e.to_string());
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, cancel);
+        Err("Dictionary document picker requires Android".into())
+    }
+}
 #[tauri::command]
 pub async fn private_connection(
     app: tauri::AppHandle,

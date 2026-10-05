@@ -1,6 +1,9 @@
 package com.tmw.companion
 
 import android.app.Activity
+import android.content.Intent
+import androidx.activity.result.ActivityResult
+import app.tauri.annotation.ActivityCallback
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -22,12 +25,69 @@ import javax.net.ssl.HttpsURLConnection
 /** Credentials never enter JavaScript, logs, or WebView storage. */
 @TauriPlugin
 class ConnectionPlugin(private val activity: Activity): Plugin(activity) {
+    private val dictionaryCanceled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val dictionaryWorker = Executors.newSingleThreadExecutor()
+    @Command
+    fun dictionaryDocument(invoke: Invoke) {
+        if (invoke.getArgs().optBoolean("cancel", false)) {
+            dictionaryCanceled.set(true)
+            invoke.resolve(JSObject())
+            return
+        }
+        dictionaryCanceled.set(false)
+        activity.runOnUiThread {
+            startActivityForResult(invoke, Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }, "dictionaryDocumentResult")
+        }
+    }
+    @ActivityCallback
+    fun dictionaryDocumentResult(invoke: Invoke, result: ActivityResult) {
+        val uri = result.data?.data
+        if (result.resultCode != Activity.RESULT_OK || uri == null || dictionaryCanceled.get()) {
+            invoke.reject("Dictionary import canceled")
+            return
+        }
+        dictionaryWorker.execute {
+            val temporary = java.io.File(activity.cacheDir, "tmw-dictionary-import.zip")
+            try {
+                activity.contentResolver.openInputStream(uri)?.use { input ->
+                    java.io.FileOutputStream(temporary).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            check(!dictionaryCanceled.get()) { "Dictionary import canceled" }
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            check(total <= 512_000_000L) { "Dictionary ZIP exceeds 512 MB" }
+                            output.write(buffer, 0, count)
+                        }
+                        output.fd.sync()
+                    }
+                } ?: error("Cannot read selected dictionary")
+                check(!dictionaryCanceled.get()) { "Dictionary import canceled" }
+                val response = JSObject()
+                response.put("path", temporary.absolutePath)
+                invoke.resolve(response)
+            } catch (e: Exception) {
+                temporary.delete()
+                invoke.reject(e.message ?: "Could not read selected dictionary")
+            }
+        }
+    }
     private val storage by lazy { MobileStorage(activity) { path, body, match ->
         val saved = load() ?: error("Pair this phone first.")
         val c = URL(endpoint(saved.getString("url")) + path).openConnection() as HttpsURLConnection
         c.connectTimeout=8000; c.readTimeout=15000; c.instanceFollowRedirects=false
         c.setRequestProperty("Authorization", "Bearer ${saved.getString("token")}")
         c.setRequestProperty("Accept-Encoding", "identity")
+        // The desktop serves one request per socket. Do not reuse proxy connections
+        // between catalog/cover requests and a selected book transfer.
+        c.setRequestProperty("Connection", "close")
         if (match != null) c.setRequestProperty("If-Match", match)
         if (body != null) {
             c.requestMethod="POST"; c.doOutput=true; c.setRequestProperty("Content-Type","application/json")
@@ -36,8 +96,43 @@ class ConnectionPlugin(private val activity: Activity): Plugin(activity) {
         }
         c
     } }
+    private val storageWorker = Executors.newSingleThreadExecutor()
     @Command
-    fun mobile(invoke: Invoke) { storage.command(invoke) }
+    fun mobile(invoke: Invoke) {
+        if(invoke.getArgs().optString("action")=="exportRecovery") {
+            activity.runOnUiThread {
+                startActivityForResult(invoke, Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type="application/zip"
+                    putExtra(Intent.EXTRA_TITLE,"tmw-phone-recovery-${System.currentTimeMillis()}.zip")
+                },"recoveryExportResult")
+            }
+            return
+        }
+        // Includes first-open SQLite setup, recovery hashes and cache reconciliation.
+        storageWorker.execute {
+            try { storage.command(invoke) }
+            catch (_: Exception) { invoke.reject("Local storage could not be opened. Reopen the app to retry.") }
+        }
+    }
+    @ActivityCallback
+    fun recoveryExportResult(invoke:Invoke, result:ActivityResult) {
+        val uri=result.data?.data
+        if(result.resultCode!=Activity.RESULT_OK || uri==null) {invoke.reject("Export canceled; local data retained");return}
+        storageWorker.execute {
+            try {
+                val output=activity.contentResolver.openOutputStream(uri,"wt") ?: error("Cannot open backup destination")
+                output.use { storage.export(it,invoke.getArgs().optJSONObject("webState")?:JSONObject()) }
+                val response=JSObject()
+                response.put("message","Recovery export saved. Keep it in a safe location outside app storage.")
+                invoke.resolve(response)
+            } catch(_:Exception) {
+                // Remove only the document just created by this export, never an existing source.
+                try {android.provider.DocumentsContract.deleteDocument(activity.contentResolver,uri)} catch(_:Exception) {}
+                invoke.reject("Export failed; discard any incomplete ZIP and retry. Local data retained.")
+            }
+        }
+    }
     private val worker = Executors.newSingleThreadExecutor()
     private val prefs = activity.getSharedPreferences("private-connection-v1", Activity.MODE_PRIVATE)
     private fun key(): SecretKey {
@@ -81,12 +176,13 @@ class ConnectionPlugin(private val activity: Activity): Plugin(activity) {
                 c.outputStream.use { it.write(bytes) }
             }
             val status = c.responseCode
+            requireProtocolEndpoint(status)
             if (status == 401) error("Device unauthorized or revoked. Pair again on the PC.")
             if (status == 403) error("Pairing code expired, denied, or already used.")
             require(status in 200..299) { "PC request failed ($status)." }
             val bytes = c.inputStream.use { it.readBytesBounded(16384) }
             val response = JSONObject(String(bytes, Charsets.UTF_8))
-            require(response.getInt("protocolVersion") == 1) { "Unsupported PC protocol. Update both apps." }
+            requireProtocol(response,1)
             return response
         } finally { c.disconnect() }
     }

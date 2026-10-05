@@ -1,4 +1,10 @@
-export type LocalBook = { name: string; bytes: ArrayBuffer; id?: string };
+export type LocalBook = {
+  name: string;
+  file?: string;
+  bytes: ArrayBuffer;
+  id?: string;
+  catalog?: { ns: string; id: string; version: string };
+};
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("tmw-offline-reader", 1);

@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 const PORT: u16 = 47831;
 const MAX_REQUEST: usize = 16_384;
-const MAX_BODY: usize = 8_192;
+const MAX_BODY: usize = 65_536;
 const MAX_FILE: u64 = 512_000_000;
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -149,6 +149,9 @@ impl Service {
             while !halt.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
+                        if prepare_accepted_socket(&socket).is_err() {
+                            continue;
+                        }
                         if active.load(Ordering::Relaxed) >= 4 {
                             let _ = socket.set_write_timeout(Some(Duration::from_secs(1)));
                             let _ = reply(&mut socket, 503, json!({"error":"busy"}));
@@ -217,6 +220,11 @@ impl Drop for Service {
     }
 }
 type Error = (u16, &'static str);
+fn prepare_accepted_socket(socket: &TcpStream) -> std::io::Result<()> {
+    // Windows accept inherits the listener's nonblocking mode. Workers use
+    // blocking read_exact/write_all with bounded timeouts, including EPUB bodies.
+    socket.set_nonblocking(false)
+}
 fn reply(s: &mut TcpStream, status: u16, value: Value) -> std::io::Result<()> {
     let body = serde_json::to_vec(&value)?;
     header(s, status, "application/json", body.len() as u64, None)?;
@@ -396,6 +404,36 @@ fn handle(
         return reply(s, 200, json!({"protocolVersion":1,"revoked":true}))
             .map_err(|_| (500, "response_failed"));
     }
+    if r.path == "/v3/user-sync" && r.method == "POST" {
+        let q:crate::db::user_sync::SyncRequest=serde_json::from_slice(&r.body).map_err(|_|(400,"invalid_sync"))?;
+        if q.operations.len()>16 {return Err((400,"sync_bounds"))}
+        let device=auth.lock().unwrap().devices.iter().find(|d|d.token_hash==hash(r.token.as_bytes())).map(|d|d.id.clone()).ok_or((401,"unauthorized"))?;
+        let db=Database::open_api_writer(catalog).map_err(|_|(503,"catalog_busy"))?;
+        // Strong versions are verified from read-only source handles outside the write transaction.
+        let mut verified=std::collections::HashSet::new();
+        for op in &q.operations {
+            if op.kind=="history" {continue}
+            if op.kind=="passage" && (op.deleted || op.fields.keys().all(|key|matches!(key.as_str(),"sentence"|"note"))) {continue}
+            if !verified.insert(&op.book_id) {continue}
+            let Some(id)=db.private_id(&op.book_id).map_err(|_|(503,"catalog_busy"))? else{continue};
+            db.forget_content_version(id).map_err(|_|(503,"catalog_busy"))?;
+            let Some(d)=db.book_details(id).map_err(|_|(503,"catalog_busy"))? else{continue};
+            if d.book.extraction_status=="unavailable" {continue}
+            let Some(root)=db.library_root(d.book.library_root_id).map_err(|_|(503,"catalog_busy"))? else{continue};
+            let Ok(path)=isolated_source(Path::new(&d.book.file_path),Path::new(&root.path)) else{continue};
+            let Ok(mut file)=source_file(&path) else{continue};
+            let before=file.metadata().map_err(|_|(409,"source_changed"))?;
+            if before.len()>MAX_FILE{return Err((413,"file_bounds"))}
+            let mut digest=Sha256::new();let mut buffer=[0u8;65536];let mut total=0u64;
+            loop {check_client(auth,&r.token,stop)?;if request_started.elapsed()>Duration::from_secs(120){return Err((408,"request_timeout"))}let n=file.read(&mut buffer).map_err(|_|(409,"source_changed"))?;if n==0{break}total+=n as u64;if total>MAX_FILE{return Err((413,"file_bounds"))}digest.update(&buffer[..n]);}
+            if total!=before.len() || file.metadata().ok().and_then(|m|m.modified().ok())!=before.modified().ok(){return Err((409,"source_changed"))}
+            let modified=before.modified().ok().and_then(|m|m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs() as i64).ok_or((409,"source_changed"))?;
+            db.remember_content_version(id,&format!("sha256-{:x}",digest.finalize()),total as i64,modified).map_err(|_|(503,"catalog_busy"))?;
+        }
+        check_client(auth,&r.token,stop)?;
+        let result=db.user_sync(&device,q).map_err(|e|(if e=="catalog_busy"{503}else{409},e))?;
+        return reply(s,200,result).map_err(|_|(500,"response_failed"));
+    }
     let db = Database::open_api_reader(catalog).map_err(|_| (503, "catalog_busy"))?;
     if r.path == "/v2/catalog" && r.method == "POST" {
         let q = serde_json::from_slice(&r.body).map_err(|_| (400, "invalid_cursor"))?;
@@ -509,6 +547,8 @@ fn handle(
                 return Err((409, "source_changed"));
             }
             if parts[4] == "content" {
+                let modified=metadata.modified().ok().and_then(|m|m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs() as i64).ok_or((409,"source_changed"))?;
+                Database::open_api_writer(catalog).and_then(|writer|writer.remember_content_version(id,&version,total as i64,modified)).map_err(|_|(503,"catalog_busy"))?;
                 return reply(
                     s,
                     200,
@@ -522,6 +562,9 @@ fn handle(
             use std::io::{Seek, SeekFrom};
             file.seek(SeekFrom::Start(0))
                 .map_err(|_| (409, "source_changed"))?;
+            // Allow bounded backpressure from the private HTTPS proxy/phone.
+            s.set_write_timeout(Some(Duration::from_secs(30)))
+                .map_err(|_| (500, "response_failed"))?;
             header(s, 200, "application/epub+zip", total, Some(&version))
                 .map_err(|_| (500, "response_failed"))?;
             let mut transferred = 0;
@@ -530,7 +573,13 @@ fn handle(
                     let _ = s.shutdown(std::net::Shutdown::Both);
                     return Ok(());
                 }
-                let n = file.read(&mut buf).map_err(|_| (500, "read_failed"))?;
+                let n = match file.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        let _ = s.shutdown(std::net::Shutdown::Both);
+                        return Ok(());
+                    }
+                };
                 if n == 0 {
                     break;
                 }
@@ -539,8 +588,12 @@ fn handle(
                     let _ = s.shutdown(std::net::Shutdown::Both);
                     return Ok(());
                 }
-                s.write_all(&buf[..n])
-                    .map_err(|_| (500, "response_failed"))?;
+                if s.write_all(&buf[..n]).is_err() {
+                    // Headers have already been sent. Close the truncated response;
+                    // never append a second HTTP response to the EPUB bytes.
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                    return Ok(());
+                }
             }
             Ok(())
         }
@@ -623,6 +676,36 @@ fn source_file(path: &Path) -> std::io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn accepted_socket_streams_beyond_send_buffer_to_slow_reader() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            // Simulate Windows inheritance on every test platform.
+            socket.set_nonblocking(true).unwrap();
+            prepare_accepted_socket(&socket).unwrap();
+            socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let chunk = [0x5au8; 65536];
+            for _ in 0..64 {
+                socket.write_all(&chunk).unwrap();
+            }
+        });
+        let mut reader = TcpStream::connect(address).unwrap();
+        reader.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let mut chunk = [0u8; 16384];
+        let mut received = 0;
+        loop {
+            let n = reader.read(&mut chunk).unwrap();
+            if n == 0 { break; }
+            assert!(chunk[..n].iter().all(|byte| *byte == 0x5a));
+            received += n;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        writer.join().unwrap();
+        assert_eq!(received, 4 * 1024 * 1024);
+    }
     use super::*;
     use crate::models::{
         book::{BookOverride, NewBook},
@@ -894,6 +977,29 @@ mod tests {
         assert_eq!(status, 200);
         let version = content["contentVersion"].as_str().unwrap();
         assert!(version.starts_with("sha256-"));
+        let namespace=database.setting("companion_catalog_id").unwrap().unwrap();
+        let sync=json!({"catalogId":namespace,"cursor":0,"operations":[{"id":"http-progress","sequence":1,"bookId":id,"kind":"progress","contentVersion":version,"fields":{"locationCfi":"epubcfi(/6/2)"}}]});
+        assert_eq!(json_response("POST","/v3/user-sync","",sync.clone()).0,401);
+        let (status,first)=json_response("POST","/v3/user-sync",token,sync.clone());
+        assert_eq!(status,200,"{first}");assert_eq!(first["acknowledged"],json!(["http-progress"]));
+        let (status,retry)=json_response("POST","/v3/user-sync",token,sync);
+        assert_eq!(status,200);assert_eq!(retry["cursor"],first["cursor"]);
+        assert_eq!(database.reading_location(local).unwrap().unwrap(),"epubcfi(/6/2)");
+        let (status,reset)=json_response("POST","/v3/user-sync",token,json!({"catalogId":namespace,"epoch":"old-backup","cursor":0}));
+        assert_eq!(status,409);assert_eq!(reset["error"],"cursor_reset");
+        // Generated oversized source: existing notes/deletions need no source read.
+        let oversized_dir=tmp.path().join("oversized-source");std::fs::create_dir(&oversized_dir).unwrap();
+        let oversized_path=oversized_dir.join("oversized.epub");File::create(&oversized_path).unwrap().set_len(MAX_FILE+1).unwrap();
+        let oversized_root=database.add_library_root(NewLibraryRoot{path:oversized_dir.to_str().unwrap(),display_name:"Generated oversized fixture"}).unwrap();
+        let oversized_book=database.upsert_scanned_book(NewBook{library_root_id:oversized_root.id,file_path:oversized_path.to_str().unwrap(),parent_folder_path:oversized_dir.to_str().unwrap(),file_name:"oversized.epub",file_size:(MAX_FILE+1) as i64,modified_time:1}).unwrap();
+        let pid=database.save_passage(&crate::models::book::SavePassageRequest{book_id:oversized_book.book_id,surface:"本".into(),headword:None,reading:None,sentence:"context".into(),note:"original".into(),location_cfi:String::new()}).unwrap();
+        let oversized_public=database.public_id(oversized_book.book_id).unwrap();
+        let entity:String=rusqlite::Connection::open(&catalog).unwrap().query_row("SELECT sync_id FROM saved_passages WHERE id=?1",[pid],|r|r.get(0)).unwrap();
+        let (status,edited)=json_response("POST","/v3/user-sync",token,json!({"catalogId":namespace,"operations":[{"id":"source-independent-note","sequence":2,"bookId":oversized_public,"kind":"passage","entityId":entity,"contentVersion":null,"fields":{"note":"phone note"}}]}));
+        assert_eq!(status,200,"{edited}");assert_eq!(edited["acknowledged"],json!(["source-independent-note"]));
+        assert_eq!(database.saved_passages(Some(oversized_book.book_id),0).unwrap()[0].note,"phone note");
+        let (status,deleted)=json_response("POST","/v3/user-sync",token,json!({"catalogId":namespace,"operations":[{"id":"source-independent-delete","sequence":3,"bookId":oversized_public,"kind":"passage","entityId":entity,"contentVersion":null,"deleted":true}]}));
+        assert_eq!(status,200,"{deleted}");assert_eq!(deleted["acknowledged"],json!(["source-independent-delete"]));
         assert_eq!(
             json_response("GET", &format!("{base}/epub"), token, Value::Null).0,
             412
@@ -1066,6 +1172,7 @@ mod identity_tests {
         drop(db);
         // Only this generated catalog simulates a genuine pre-15 backup, not a user database.
         let old = rusqlite::Connection::open(&path).unwrap();
+        crate::db::user_sync::remove_test_schema(&old);
         old.execute_batch("DROP TRIGGER companion_book_insert; DROP TABLE companion_books; DELETE FROM app_settings WHERE key='companion_catalog_id'; PRAGMA user_version=14;").unwrap();
         drop(old);
         let legacy = tmp.path().join("legacy.sqlite3");

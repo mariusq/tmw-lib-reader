@@ -25,7 +25,7 @@ mod tests {
             tag_id: None,
             collection_id: None,
             needs_metadata: false,
-            hide_duplicate_titles: false,
+            hide_duplicate_titles: false, duplicate_filtering: None,
             query: String::new(),
             sort: "title".into(),
             offset: 0,

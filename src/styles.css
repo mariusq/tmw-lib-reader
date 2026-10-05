@@ -59,6 +59,51 @@ button {
   cursor: not-allowed;
   opacity: 0.4;
 }
+.desktop-reader .reader-control {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
+  width: auto;
+  margin: 0;
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--reader-foreground) 24%, transparent);
+  background: color-mix(in srgb, var(--reader-foreground) 4%, var(--reader-background));
+  color: var(--reader-foreground);
+  opacity: 1;
+  transition: background 120ms, border-color 120ms;
+}
+.desktop-reader .reader-control:hover {
+  background: color-mix(in srgb, var(--reader-foreground) 10%, var(--reader-background));
+  border-color: color-mix(in srgb, var(--reader-foreground) 45%, transparent);
+}
+.desktop-reader .reader-control:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+.desktop-reader .reader-control:disabled {
+  opacity: 0.4;
+}
+.desktop-reader select.reader-control {
+  display: inline-block;
+  padding-right: 1.75rem;
+}
+.desktop-reader select.reader-control option {
+  background: var(--reader-background);
+  color: var(--reader-foreground);
+}
+.desktop-reader .reader-chapter-picker > summary {
+  display: list-item;
+  cursor: pointer;
+}
+.reader-font-group {
+  border-inline-start: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  padding-inline-start: 0.5rem;
+}
+.desktop-reader footer {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
 .dictionary-popup {
   position: absolute;
   z-index: 5;
@@ -91,4 +136,24 @@ button {
   background: rgb(28 25 23);
   padding: 1.5rem;
   box-shadow: -16px 0 40px rgb(0 0 0 / 0.35);
+}
+.reader-chapter-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+.reader-chapter-picker > nav {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 60;
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  background: inherit;
+  box-shadow: 0 8px 24px #0006;
+}
+.reader-chapter-picker > nav button:hover,
+.reader-chapter-picker > nav button:focus-visible {
+  background: #8883;
 }

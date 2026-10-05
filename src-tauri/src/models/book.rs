@@ -95,16 +95,7 @@ pub struct ReaderBook {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DictionaryEntry {
-    pub id: i64,
-    pub term: String,
-    pub reading: Option<String>,
-    pub definitions: Vec<String>,
-    pub part_of_speech: Vec<String>,
-    pub dictionary_name: String,
-}
+pub use tmw_japanese_core::lookup::DictionaryEntry;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +169,8 @@ pub struct BrowseBooksRequest {
     pub needs_metadata: bool,
     #[serde(default)]
     pub hide_duplicate_titles: bool,
+    #[serde(default)]
+    pub duplicate_filtering: Option<String>,
     #[serde(default)]
     pub query: String,
     pub sort: String,

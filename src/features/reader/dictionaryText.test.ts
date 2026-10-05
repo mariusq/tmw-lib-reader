@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { dictionaryTextAt, japaneseWordAt } from "./dictionaryText";
+import corpus from "../../../docs/dictionary-comparison-corpus.json";
 
 describe("dictionaryTextAt", () => {
+  for (const fixture of corpus.cases.filter((row) => row.html)) {
+    it(`collects the comparison corpus ${fixture.id} across DOM nodes`, () => {
+      document.body.innerHTML = `<p>${fixture.html}</p>`;
+      const root = document.querySelector("p")!;
+      const target = root.querySelector(fixture.selector!)!.childNodes[fixture.nodeIndex!] as Text;
+      expect(dictionaryTextAt(root, target, fixture.utf16Offset!)).toEqual({
+        text: fixture.text, offset: fixture.offset,
+      });
+    });
+  }
   it("omits furigana while retaining the base text and click offset", () => {
     document.body.innerHTML = `<p>小さく、<ruby>溜<rt>た</rt>息<rt>めいき</rt></ruby>を吐く。</p>`;
     const root = document.querySelector("p")!;

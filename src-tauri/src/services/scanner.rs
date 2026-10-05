@@ -69,6 +69,14 @@ pub struct ScanController {
 }
 
 impl ScanController {
+    pub fn while_idle<T>(&self, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let scans = self.scans.lock().expect("scan mutex poisoned");
+        if !scans.is_empty() {
+            return Err("Wait for library scans to finish before deleting a book.".into());
+        }
+        action()
+    }
+
     pub fn start(&self, scan_id: &str, root_id: i64) -> Result<Arc<AtomicBool>, String> {
         let mut scans = self.scans.lock().expect("scan mutex poisoned");
         if scans.contains_key(scan_id) {

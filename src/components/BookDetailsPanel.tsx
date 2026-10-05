@@ -77,6 +77,7 @@ export function BookDetailsPanel({
   const [collectionName, setCollectionName] = useState("");
   const [seriesName, setSeriesName] = useState("");
   const [reading, setReading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const refresh = async () => {
     const [result, group] = await Promise.all([
       invoke<Details | null>("get_book_details", { bookId }),
@@ -114,6 +115,20 @@ export function BookDetailsPanel({
       onSaved();
     } catch (reason) {
       setError(String(reason));
+    }
+  };
+  const deleteBook = async () => {
+    if (deleting || !window.confirm(`DELETE BOOK “${details.effectiveTitle}”?\n\nThis will delete the EPUB from your computer:\n${details.book.filePath}\n\nIt also removes its catalog entry, corrections, tags, collection memberships, reading progress and saved passages. Lookup history keeps its text but loses its book link. Other books and folders are untouched.\n\nA local recovery copy of the EPUB (if present) and catalog will be saved in the app-data backups/deleted-book folder. Existing phone copies are not deleted.\n\nDelete this book?`)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const backup = await invoke<string>("delete_book", { bookId, expectedPath: details.book.filePath });
+      window.alert(`Book deleted. Recovery backup: ${backup}`);
+      onSaved();
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+      setDeleting(false);
     }
   };
   const reset = async (field: string) => {
@@ -372,6 +387,12 @@ export function BookDetailsPanel({
           {error}
         </p>
       )}
+      <section className="mt-7 border-t border-red-400/30 pt-5">
+        <p className="mb-3 text-sm text-stone-400">Deletes this EPUB from your computer and removes its library entry. A local recovery backup is saved first. Android marks it unavailable on the next catalog refresh; downloaded copies remain readable. Saved-passage deletions sync too.</p>
+        <button className="rounded border border-red-400/60 bg-red-500/10 px-4 py-2 font-semibold text-red-300 hover:bg-red-500/20 disabled:opacity-50" disabled={deleting} onClick={() => void deleteBook()}>
+          {deleting ? "Deleting…" : "DELETE BOOK"}
+        </button>
+      </section>
     </aside>
   );
 }

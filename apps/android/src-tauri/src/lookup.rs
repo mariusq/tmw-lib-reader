@@ -2,8 +2,15 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::{fs, path::Path, sync::Mutex, time::Instant};
 use tmw_japanese_core::{
+    chunk_lookup::{self, Response},
+    dictionary_storage::Storage,
+    lookup::LookupRequest,
+    lookup_storage::{Schema, SqliteStore},
+};
+#[cfg(test)]
+use tmw_japanese_core::{
     dictionary::{normalize_query, LOOKUP_PREDICATE},
-    readings::{dictionary_target, DictionaryTarget},
+    lookup::DictionaryEntry as Entry,
 };
 static LOCK: Mutex<()> = Mutex::new(());
 const DATA: &[u8] = include_bytes!("../assets/jmdict-20260928-v2.sqlite3.gz");
@@ -31,21 +38,14 @@ fn database(root: &Path) -> Result<Connection, String> {
     }
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())
 }
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Entry {
-    term: String,
-    reading: Option<String>,
-    definitions: Vec<String>,
-    part_of_speech: Vec<String>,
-}
+#[cfg(test)]
 fn query(db: &Connection, value: &str) -> Result<Vec<Entry>, String> {
     let normalized = normalize_query(value);
     if normalized.is_empty() {
         return Ok(vec![]);
     }
     let sql = format!(
-        "SELECT term,reading,definitions,part_of_speech FROM entries e WHERE {LOOKUP_PREDICATE}"
+        "SELECT term,reading,definitions,part_of_speech,id FROM entries e WHERE {LOOKUP_PREDICATE}"
     );
     let mut statement = db.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = statement
@@ -53,6 +53,8 @@ fn query(db: &Connection, value: &str) -> Result<Vec<Entry>, String> {
             rusqlite::params![normalized, format!("{normalized}%")],
             |r| {
                 Ok(Entry {
+                    id: r.get(4)?,
+                    dictionary_name: "JMdict".into(),
                     term: r.get(0)?,
                     reading: r.get(1)?,
                     definitions: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
@@ -68,31 +70,31 @@ fn query(db: &Connection, value: &str) -> Result<Vec<Entry>, String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
-    target: DictionaryTarget,
-    entries: Vec<Entry>,
+    #[serde(flatten)]
+    pub result: Response,
     elapsed_ms: f64,
     dictionary_bytes: usize,
 }
 pub fn lookup(root: &Path, text: &str, offset: usize) -> Result<Report, String> {
-    if text.chars().count() > 16000 {
-        return Err("Text window exceeds 16000 characters".into());
-    }
     let _guard = LOCK.lock().map_err(|e| e.to_string())?;
     let started = Instant::now();
-    let target = dictionary_target(text, offset)?;
     let db = database(root)?;
-    let mut entries = query(&db, &target.surface)?;
-    if entries.is_empty() && target.lemma != target.surface {
-        entries = query(&db, &target.lemma)?;
-    }
-    if entries.is_empty() {
-        if let Some(reading) = &target.reading {
-            entries = query(&db, reading)?;
-        }
-    }
+    let mut imported = Storage::open(&root.join("yomitan-v1"))?;
+    let mut bundled = SqliteStore {
+        connection: &db,
+        schema: Schema::Bundled,
+    };
+    let mut result = chunk_lookup::lookup(
+        &LookupRequest {
+            text: text.into(),
+            offset,
+        },
+        &mut (&mut imported, &mut bundled),
+    )?;
+    imported.limit_response(&mut result)?;
+    imported.decorate_response(&mut result)?;
     Ok(Report {
-        target,
-        entries,
+        result,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
         dictionary_bytes: fs::metadata(root.join("jmdict-20260928-v2.sqlite3"))
             .map_err(|e| e.to_string())?
@@ -106,12 +108,26 @@ mod tests {
     fn bundled_lookup_and_atomic_install() {
         let root = tempfile::tempdir().unwrap();
         let r = lookup(root.path(), "猫を食べました。", 3).unwrap();
-        assert_eq!(r.target.lemma, "食べる");
+        assert_eq!(r.result.groups[0].term, "食べる");
         assert_eq!(
-            dictionary_target("😀 猫を食べました。", 2).unwrap().surface,
+            tmw_japanese_core::readings::dictionary_target("😀 猫を食べました。", 2)
+                .unwrap()
+                .surface,
             "猫"
         );
-        assert!(r.entries.iter().any(|e| e.term == "食べる"));
+        assert!(r.result.groups.iter().any(|e| e.term == "食べる"));
+        let serialized = serde_json::to_value(&r).unwrap();
+        assert_eq!(serialized["engineVersion"], 2);
+        assert!(serialized.get("target").is_some());
+        assert!(serialized.get("result").is_none());
+        assert_eq!(
+            serialized["groups"][0]["matches"][0]["entry"]["provenance"]["title"],
+            "JMdict"
+        );
+        assert_eq!(
+            serialized["matchedSpan"],
+            serde_json::json!({"start": 2, "end": 7})
+        );
         let db = database(root.path()).unwrap();
         assert_eq!(query(&db, "猫").unwrap()[0].term, "猫");
         assert_eq!(

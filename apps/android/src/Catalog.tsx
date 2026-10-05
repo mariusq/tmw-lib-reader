@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import type { LocalBook } from "./localBook";
+import SavedPassages from "./SavedPassages";
 
 type Book = {
   ns: string;
@@ -22,10 +23,11 @@ type Job = { busy: boolean; message: string; done?: number; total?: number };
 let nextCoverToken = 0;
 const mobile = <T,>(args: Record<string, unknown>) => invoke<T>("mobile_storage", { args });
 
-function Cover({ book, generation }: { book: Book; generation: number }) {
+function Cover({ book, generation, showCovers }: { book: Book; generation: number; showCovers: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const [data, setData] = useState("");
   useEffect(() => {
+    if (!showCovers) return;
     let disposed = false;
     let token = "";
     const observer = new IntersectionObserver((entries) => {
@@ -57,20 +59,22 @@ function Cover({ book, generation }: { book: Book; generation: number }) {
       observer.disconnect();
       if (token) void mobile({ action: "coverCancel", token }).catch(() => {});
     };
-  }, [book.ns, book.id, book.coverVersion, book.download?.version, generation]);
+  }, [book.ns, book.id, book.coverVersion, book.download?.version, generation, showCovers]);
   return (
-    <div ref={host} className="h-24 w-16 shrink-0 bg-slate-800">
-      {data ? (
+    <div ref={host} className="book-cover">
+      {showCovers && data ? (
         <img src={data} alt="" decoding="async" className="h-full w-full object-contain" />
       ) : (
-        <span className="text-xs text-slate-500">No cover</span>
+        <span className="text-xs text-slate-500">文</span>
       )}
     </div>
   );
 }
 
 export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void }) {
+  const [showCovers, setShowCovers] = useState(() => localStorage.getItem("tmw-show-covers") !== "false");
   const [page, setPage] = useState<Page>({ items: [], next: null, ns: "", namespaces: [] });
+  const [recentBooks, setRecentBooks] = useState<Book[]>([]);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("title");
   const [filter, setFilter] = useState("");
@@ -87,6 +91,15 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
   const [coverGeneration, setCoverGeneration] = useState(0);
   const reading = useRef(false);
   const pendingJob = useRef(false);
+  const [transferBook, setTransferBook] = useState("");
+  const [notesBook, setNotesBook] = useState<Book>();
+  useEffect(() => {
+    let disposed = false;
+    void mobile<Page>({ action: "browse", recent: true, ...(ns ? { ns } : {}) })
+      .then(result => { if (!disposed) setRecentBooks(result.items.filter(book => book.download).slice(0, 5)); })
+      .catch(reason => { if (!disposed) setError(String(reason)); });
+    return () => { disposed = true; };
+  }, [ns, refresh]);
   useEffect(() => {
     const current = ++generation.current;
     let disposed = false;
@@ -144,16 +157,21 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
       .catch(() => {});
   }, [refresh]);
   async function run(args: Record<string, unknown>) {
+    const background = args.action === "sync" || args.action === "download";
     try {
       setError("");
-      await mobile(args);
-      if (args.action === "sync" || args.action === "download") {
-        pendingJob.current = true;
+      if (background) {
+        setTransferBook(args.action === "download" ? `${args.ns}:${args.id}` : "");
         setJob({ busy: true, message: "Starting" });
+      }
+      await mobile(args);
+      if (background) {
+        pendingJob.current = true;
       }
       setRefresh((v) => v + 1);
     } catch (e) {
       setError(String(e));
+      if (background) setJob({ busy: false, message: String(e) });
     }
   }
   async function read(book: Book) {
@@ -161,7 +179,13 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
     reading.current = true;
     try {
       const bytes = await invoke<ArrayBuffer>("read_mobile_book", { file: book.download.file });
-      onOpen({ name: book.title, bytes, id: book.download.version.slice(7) });
+      onOpen({
+        name: book.title,
+        file: book.download.file,
+        bytes,
+        id: book.download.version.slice(7),
+        catalog: { ns: book.ns, id: book.id, version: book.download.version },
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -170,7 +194,18 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
   }
   return (
     <section className="space-y-3 border-b border-slate-700 pb-4">
-      <h2>Offline catalog</h2>
+      <section aria-labelledby="jump-back-heading" className="rounded-xl border border-slate-700 p-3">
+        <h3 id="jump-back-heading" className="font-semibold">Jump back in</h3>
+        <p className="mt-1 text-sm text-slate-400">Your last five opened books. Continue where you left off.</p>
+        {recentBooks.length ? <div className="mt-3 flex gap-3 overflow-x-auto pb-2">
+          {recentBooks.map(book => <button key={`${book.ns}:${book.id}`} className="w-28 shrink-0 text-left" aria-label={`Resume: ${book.title}`} onClick={() => void read(book)}>
+            <Cover book={book} generation={coverGeneration} showCovers={showCovers} />
+            <span className="mt-2 block truncate text-sm font-medium">{book.title}</span>
+            <span className="block truncate text-xs text-slate-400">{book.creator}</span>
+          </button>)}
+        </div> : <p className="mt-3 text-sm text-slate-400">Open a downloaded book and it will appear here.</p>}
+      </section>
+      <p className="eyebrow">ON YOUR DEVICE</p>
       <div className="flex gap-2">
         <button
           className="control"
@@ -206,74 +241,89 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
           setOffset(0);
         }}
       />
-      <div className="flex flex-wrap gap-2">
-        <select
-          aria-label="Sort"
-          className="control bg-slate-800"
-          value={sort}
+      <label className="flex min-h-11 w-fit cursor-pointer items-center gap-2">
+        <input
+          type="checkbox"
+          className="accent-amber-400"
+          checked={showCovers}
           onChange={(e) => {
-            setSort(e.target.value);
-            setOffset(0);
+            setShowCovers(e.target.checked);
+            localStorage.setItem("tmw-show-covers", String(e.target.checked));
           }}
-        >
-          {["title", "author", "series", "dateAdded", "modified"].map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-        <select
-          aria-label="Availability"
-          className="control bg-slate-800"
-          value={filter}
-          onChange={(e) => {
-            setFilter(e.target.value);
-            setOffset(0);
-          }}
-        >
-          {["", "downloaded", "available", "unavailable", "finished"].map((s) => (
-            <option key={s} value={s}>
-              {s || "All books"}
-            </option>
-          ))}
-        </select>
-        {page.namespaces.length > 1 && (
+        />
+        Show covers
+      </label>
+      <details className="catalog-filters">
+        <summary>Filter & sort</summary>
+        <div className="flex flex-wrap gap-2">
           <select
-            aria-label="Catalog"
+            aria-label="Sort"
             className="control bg-slate-800"
-            value={ns || page.ns}
+            value={sort}
             onChange={(e) => {
-              setNs(e.target.value);
+              setSort(e.target.value);
               setOffset(0);
             }}
           >
-            {page.namespaces.map((s) => (
+            {["title", "author", "series", "dateAdded", "modified"].map((s) => (
               <option key={s}>{s}</option>
             ))}
           </select>
-        )}
-        <input
-          aria-label="Tag name"
-          placeholder="Exact tag name"
-          className="w-40 bg-slate-800 p-2"
-          value={tag}
-          onChange={(e) => {
-            setTag(e.target.value);
-            setOffset(0);
-          }}
-        />
-        <input
-          aria-label="Collection name"
-          placeholder="Exact collection name"
-          className="w-40 bg-slate-800 p-2"
-          value={collection}
-          onChange={(e) => {
-            setCollection(e.target.value);
-            setOffset(0);
-          }}
-        />
-      </div>
+          <select
+            aria-label="Availability"
+            className="control bg-slate-800"
+            value={filter}
+            onChange={(e) => {
+              setFilter(e.target.value);
+              setOffset(0);
+            }}
+          >
+            {["", "downloaded", "available", "unavailable", "finished"].map((s) => (
+              <option key={s} value={s}>
+                {s || "All books"}
+              </option>
+            ))}
+          </select>
+          {page.namespaces.length > 1 && (
+            <select
+              aria-label="Catalog"
+              className="control bg-slate-800"
+              value={ns || page.ns}
+              onChange={(e) => {
+                setNs(e.target.value);
+                setOffset(0);
+              }}
+            >
+              {page.namespaces.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+          )}
+          <input
+            aria-label="Tag name"
+            placeholder="Exact tag name"
+            className="w-40 bg-slate-800 p-2"
+            value={tag}
+            onChange={(e) => {
+              setTag(e.target.value);
+              setOffset(0);
+            }}
+          />
+          <input
+            aria-label="Collection name"
+            placeholder="Exact collection name"
+            className="w-40 bg-slate-800 p-2"
+            value={collection}
+            onChange={(e) => {
+              setCollection(e.target.value);
+              setOffset(0);
+            }}
+          />
+        </div>
+      </details>
       {page.items.map((book) => (
-        <article key={`${book.ns}:${book.id}`} className="flex gap-3 rounded bg-slate-900 p-2">
-          <Cover book={book} generation={coverGeneration} />
+        <article key={`${book.ns}:${book.id}`} className="book-card">
+          <Cover book={book} generation={coverGeneration} showCovers={showCovers} />
           <div className="min-w-0 flex-1">
             <h3 lang="ja">{book.title}</h3>
             <p className="text-xs">
@@ -284,10 +334,13 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
               {book.download ? "On device" : book.available ? "PC copy" : "Source unavailable"}
               {book.deleted ? " · Removed from PC catalog" : ""}
             </p>
-            <div className="flex gap-2">
+            <div className="book-actions">
+              <button className="control" onClick={() => setNotesBook(book)}>
+                Notes
+              </button>
               {book.download ? (
                 <>
-                  <button className="control" onClick={() => void read(book)}>
+                  <button className="control primary" onClick={() => void read(book)}>
                     Read offline
                   </button>
                   <button
@@ -308,11 +361,40 @@ export default function Catalog({ onOpen }: { onOpen: (book: LocalBook) => void 
                 </button>
               )}
             </div>
+            {!book.download && (book.deleted || !book.available || book.bytes > 64_000_000) && (
+              <p className="text-xs text-amber-300">
+                {book.deleted || !book.available
+                  ? "Download unavailable: the PC source is unavailable."
+                  : "Download unavailable: this book exceeds the current 64 MB reader limit."}
+              </p>
+            )}
+            {transferBook === `${book.ns}:${book.id}` && (
+              <p role="status" className="text-xs">
+                {job.message}
+                {job.total
+                  ? ` · ${((job.done ?? 0) / 1e6).toFixed(1)} / ${(job.total / 1e6).toFixed(1)} MB`
+                  : ""}
+              </p>
+            )}
           </div>
         </article>
       ))}
       {!page.items.length && <p>No local results. Pair under Settings, then refresh.</p>}
-      <nav className="flex gap-3">
+      {notesBook && (
+        <section className="rounded border border-slate-700 p-3">
+          <p>{notesBook.title}</p>
+          <button className="control" onClick={() => setNotesBook(undefined)}>
+            Close notes
+          </button>
+          <SavedPassages
+            key={`${notesBook.ns}:${notesBook.id}`}
+            book={{ ns: notesBook.ns, id: notesBook.id, version: null }}
+            revision={refresh}
+            onJump={() => {}}
+          />
+        </section>
+      )}
+      <nav className="pagination">
         <button
           className="control"
           disabled={offset === 0}

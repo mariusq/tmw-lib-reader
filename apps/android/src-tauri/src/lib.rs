@@ -1,4 +1,5 @@
 mod connection;
+mod dictionary_import;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::{fs, path::Path, time::Instant};
@@ -99,7 +100,12 @@ async fn run_feasibility_probe(app: tauri::AppHandle) -> Result<ProbeReport, Str
 pub fn run() {
     tauri::Builder::default()
         .plugin(connection::plugin())
+        .manage(tmw_japanese_core::dictionary_storage::Jobs::default())
         .invoke_handler(tauri::generate_handler![
+            dictionary_import::dictionary_import,
+            dictionary_import::dictionary_manage,
+            dictionary_import::dictionary_import_status,
+            dictionary_import::cancel_dictionary_import,
             run_feasibility_probe,
             lookup_text,
             connection::private_connection,

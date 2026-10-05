@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 pub struct LookupRecord {
     pub surface: String,
     pub entry_id: Option<i64>,
+    pub headword: Option<String>,
+    pub reading: Option<String>,
+    pub dictionary_id: Option<String>,
     pub book_id: Option<i64>,
     pub location_cfi: String,
     pub sentence: String,
@@ -50,6 +53,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let database = Database::open(&directory.path().join("catalog.sqlite3")).unwrap();
         database.set_setting("existing_preference", "kept").unwrap();
+        super::user_sync::remove_test_schema(&database.connection.lock().unwrap());
         database
             .connection
             .lock()
@@ -71,10 +75,30 @@ mod tests {
         LookupRecord {
             surface: surface.into(),
             entry_id,
+            headword: None,
+            reading: None,
+            dictionary_id: None,
             book_id: None,
             location_cfi: String::new(),
             sentence: String::new(),
         }
+    }
+
+    #[test]
+    fn imported_history_preserves_portable_identity_without_legacy_rows() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("catalog.sqlite3")).unwrap();
+        let mut record = request("読んだ", None);
+        record.headword = Some("読む".into());
+        record.reading = Some("よむ".into());
+        record.dictionary_id = Some("yomitan:JMdict:fixture".into());
+        assert_eq!(database.record_lookup(&record).unwrap(), Some(1));
+        assert_eq!(database.record_lookup(&record).unwrap(), Some(2));
+        let rows = database.lookup_history("よむ", 0).unwrap();
+        assert_eq!(rows[0].headword.as_deref(), Some("読む"));
+        assert_eq!(rows[0].reading.as_deref(), Some("よむ"));
+        let provenance: (String, String) = database.connection.lock().unwrap().query_row("SELECT dictionary_id,dictionary_label FROM lookup_history LIMIT 1", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(provenance, ("yomitan:JMdict:fixture".into(), "yomitan:JMdict:fixture".into()));
     }
 
     #[test]
@@ -268,6 +292,9 @@ impl Database {
     pub fn record_lookup(&self, request: &LookupRecord) -> rusqlite::Result<Option<i64>> {
         if request.surface.trim().is_empty()
             || request.surface.chars().count() > 256
+            || request.headword.as_ref().is_some_and(|v| v.chars().count() > 256)
+            || request.reading.as_ref().is_some_and(|v| v.chars().count() > 256)
+            || request.dictionary_id.as_ref().is_some_and(|v| v.len() > 1024)
             || request.sentence.chars().count() > 4000
             || request.location_cfi.len() > 4096
             || (!request.location_cfi.is_empty() && !request.location_cfi.starts_with("epubcfi("))
@@ -287,14 +314,16 @@ impl Database {
         if enabled.as_deref() == Some("false") {
             return Ok(None);
         }
-        let (headword, reading): (Option<String>, Option<String>) = match request.entry_id {
+        let (headword, reading): (Option<String>, Option<String>) = if request.dictionary_id.is_some() {
+            (request.headword.clone(), request.reading.clone())
+        } else { match request.entry_id {
             Some(id) => transaction.query_row(
                 "SELECT term,reading FROM dictionary_entries WHERE id=?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?,
             None => (None, None),
-        };
+        }};
         // Length-safe JSON tuple, with distinct namespaces for unresolved queries.
         let identity = serde_json::to_string(&(
             if headword.is_some() { "entry" } else { "query" },
@@ -316,7 +345,7 @@ impl Database {
             headword.as_deref().unwrap_or(""),
             reading.as_deref().unwrap_or("")
         ));
-        transaction.execute("INSERT INTO lookup_history(identity,surface,headword,reading,search_text,book_id,location_cfi,sentence,source_size,source_modified,looked_up_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![identity, request.surface, headword, reading, search, request.book_id, request.location_cfi, request.sentence, source.0, source.1, unix_timestamp()])?;
+        transaction.execute("INSERT INTO lookup_history(identity,surface,headword,reading,search_text,book_id,location_cfi,sentence,source_size,source_modified,looked_up_at,content_version,dictionary_id,dictionary_label) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,(SELECT version FROM companion_content_versions WHERE book_id=?6 AND source_size=?9 AND source_modified=?10),COALESCE(?13,'legacy-desktop'),COALESCE(?13,(SELECT d.name FROM dictionaries d JOIN dictionary_entries e ON e.dictionary_id=d.id WHERE e.id=?12)))", params![identity, request.surface, headword, reading, search, request.book_id, request.location_cfi, request.sentence, source.0, source.1, unix_timestamp(), request.entry_id, request.dictionary_id])?;
         // Counts describe the most recent 10,000 intentional lookups, never occurrences.
         transaction.execute("DELETE FROM lookup_history WHERE id IN (SELECT id FROM lookup_history ORDER BY id DESC LIMIT -1 OFFSET 10000)", [])?;
         let count = transaction.query_row(
@@ -357,6 +386,11 @@ impl Database {
         rows
     }
 
+    pub fn delete_lookup_history(&self, id: i64) -> rusqlite::Result<()> {
+        self.connection.lock().expect("database mutex poisoned").execute("DELETE FROM lookup_history WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     pub fn clear_lookup_history(&self) -> rusqlite::Result<()> {
         self.connection
             .lock()
@@ -366,7 +400,7 @@ impl Database {
     }
 
     pub fn lookup_history_location(&self, id: i64) -> Result<String, String> {
-        let (path,cfi,size,modified): (String,String,i64,i64) = self.connection.lock().expect("database mutex poisoned").query_row("SELECT b.file_path,h.location_cfi,h.source_size,h.source_modified FROM lookup_history h JOIN books b ON b.id=h.book_id WHERE h.id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e| e.to_string())?;
+        let (path,cfi,size,modified): (String,String,i64,i64) = self.connection.lock().expect("database mutex poisoned").query_row("SELECT b.file_path,h.location_cfi,h.source_size,h.source_modified FROM lookup_history h JOIN books b ON b.id=h.book_id WHERE h.id=?1 AND (h.content_version IS NULL OR EXISTS(SELECT 1 FROM companion_content_versions v WHERE v.book_id=b.id AND v.version=h.content_version AND v.source_size=b.file_size AND v.source_modified=b.modified_time))", [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e| e.to_string())?;
         if cfi.is_empty() {
             return Err("No source anchor was captured.".into());
         }

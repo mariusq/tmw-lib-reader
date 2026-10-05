@@ -15,11 +15,13 @@ declare module "epubjs" {
   };
   export type SpineSection = { href: string; next: () => SpineSection | undefined };
   export type Book = {
+    locations: { generate: (characters: number) => Promise<string[]>; percentageFromCfi: (cfi: string) => number | null };
+    loaded: { navigation: Promise<{ toc: import("../../packages/reader-core/ChapterPicker").Chapter[] }> };
     opened: Promise<void>;
     packaging: { metadata: { layout?: string } };
     renderTo: (element: HTMLElement, options: Record<string, unknown>) => Rendition;
     destroy: () => void;
-    spine: { get: (target: string | number) => SpineSection | null; spineItems: Array<{ index: number; linear: string }> };
+    spine: { hooks: { content: { register: (callback: (document: Document) => void) => void } }; get: (target: string | number) => SpineSection | null; spineItems: Array<{ index: number; linear: string }> };
   };
   export default function ePub(input: string): Book;
 }
