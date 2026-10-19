@@ -236,7 +236,8 @@ furigana and palette changes recreate or restyle at the current CFI without
 navigation. Fixed-layout content retains publication styling. Device-local reader
 keys: `tmw-reader-theme`, `tmw-reader-font-size`, `tmw-reader-writing-mode`
 (legacy vertical-lr resolves to vertical-rl), `tmw-reader-hide-furigana`. Other
-device-local keys: `tmw-show-covers`, `tmw-library-layout`,
+device-local keys: `tmw-app-theme` (desktop library scheme; never applied inside
+`.desktop-reader`), `tmw-show-covers`, `tmw-library-layout`,
 `tmw-consolidate-series`, `tmw-series-confidence`, `tmw-series-group-copies`.
 Android recovery exports include its reader and series preferences.
 Desktop progress percentage uses epub.js 150-character CFI locations; hidden until
