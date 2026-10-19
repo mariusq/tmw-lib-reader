@@ -370,7 +370,9 @@ Recent-book IDs are bounded per catalog namespace in native settings.
 
 ## Private connection and synchronization
 
-Service is opt-in, disabled each desktop start, loopback `127.0.0.1:47831`.
+Service starts with the desktop by default (app setting `companion_autostart`;
+only "false" opts out; startup bind failures are logged, never fatal) and can be
+disabled in Settings; loopback `127.0.0.1:47831`.
 Private Tailscale Serve only; inspect existing configuration before changing it.
 Phone accepts validated root HTTPS `.ts.net` addresses on 443; no redirects,
 cleartext or certificate bypass. Credentials remain native Keystore AES-GCM,

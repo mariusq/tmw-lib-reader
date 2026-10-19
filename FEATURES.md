@@ -94,7 +94,8 @@ these features are in `AGENTS.md`; update this file whenever behavior changes.
 
 ## Android companion
 
-- Pairs privately with the PC over Tailscale Serve. Browses the full catalog
+- Pairs privately with the PC over Tailscale Serve. The desktop starts its private
+  connection automatically (can be turned off under Settings). Browses the full catalog
   offline, with search, filters and series consolidation, and downloads read-only
   copies.
 - Home shows Continue Reading/Resume, recent books (including books read only on
