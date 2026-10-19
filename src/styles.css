@@ -18,7 +18,7 @@ body {
   content-visibility: auto;
 }
 .catalog-item-grid {
-  contain-intrinsic-size: auto 28rem;
+  contain-intrinsic-size: auto 20rem;
 }
 .catalog-item-list {
   contain-intrinsic-size: auto 6.5rem;
@@ -316,3 +316,23 @@ button:disabled {
 .home-heatmap { grid-template-rows: repeat(7,11px); grid-auto-columns: 11px; gap: 3px; }
 .heatmap-day { width: 11px; height: 11px; }
 @media(max-width: 1100px) { .home-activity-layout { grid-template-columns: minmax(0,1fr); } }
+
+/* Library comfort: denser responsive grid, hover-revealed selection and quick Read. */
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: 1.25rem 1rem; }
+.library-shell .catalog-item-grid > button > div:first-child { transition: transform 150ms, box-shadow 150ms; }
+.library-shell .catalog-item-grid:hover > button > div:first-child,
+.library-shell .catalog-item-grid:focus-within > button > div:first-child { transform: translateY(-2px); box-shadow: 0 10px 24px #0008, 0 0 0 1px #fbbf2440; }
+.catalog-select { opacity: 0; transition: opacity 120ms; }
+.catalog-item:hover .catalog-select, .catalog-item:focus-within .catalog-select, .has-selection .catalog-select { opacity: 1; }
+.catalog-read-overlay { position: absolute; inset: 0 0 auto 0; aspect-ratio: 2 / 3; z-index: 10; display: flex; align-items: flex-end; padding: .5rem; pointer-events: none; }
+.catalog-read-row { display: flex; align-items: center; flex-shrink: 0; }
+.catalog-read { pointer-events: auto; border-radius: 999px; background: #fbbf24; padding: .3rem .75rem; font-size: .8rem; font-weight: 600; color: #1c1917; box-shadow: 0 4px 12px #0007; opacity: 0; transform: translateY(4px); transition: opacity 120ms, transform 120ms, background 120ms; }
+.catalog-read:hover { background: #fcd34d; }
+.catalog-item:hover .catalog-read, .catalog-item:focus-within .catalog-read { opacity: 1; transform: none; }
+@media (hover: none) { .catalog-select, .catalog-read { opacity: 1; transform: none; } }
+.detail-backdrop { position: fixed; inset: 0; z-index: 19; background: #0007; }
+.scan-indicator { display: flex; align-items: center; gap: .5rem; margin-top: .75rem; border: 1px solid #fbbf2440; border-radius: .6rem; background: #fbbf2410; padding: .5rem .7rem; font-size: .75rem; color: #fde68a; text-align: left; }
+.scan-indicator:hover { background: #fbbf2420; }
+.scan-indicator-dot { width: .5rem; height: .5rem; flex-shrink: 0; border-radius: 999px; background: #fbbf24; animation: scan-pulse 1.2s ease-in-out infinite; }
+@keyframes scan-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .scan-indicator-dot { animation: none; } .catalog-read, .library-shell .catalog-item-grid > button > div:first-child { transition: none; } }

@@ -14,7 +14,7 @@ describe("Series copies", () => {
   it("switches between grid and list while retaining copy groups", () => {
     const props = { books: [book(1), book(2)], groupCopies: true, showCovers: false, language: "en" as const, hasMore: false, onOpen: vi.fn() };
     const { container, rerender } = render(<SeriesBooks {...props} layout="grid" />);
-    expect(container.querySelector('[data-layout="grid"]')).toHaveClass("grid", "grid-cols-2");
+    expect(container.querySelector('[data-layout="grid"]')).toHaveClass("library-grid");
     expect(screen.getByText("Show 2 copies")).toBeInTheDocument();
     rerender(<SeriesBooks {...props} layout="list" />);
     expect(container.querySelector('[data-layout="list"]')).toHaveClass("space-y-3");

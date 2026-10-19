@@ -337,7 +337,7 @@ export function ReadingHome({
               </div>
               <div className="home-day-detail" aria-live="polite" aria-busy={dayLoading}>
                 <h3 className="text-sm font-medium">
-                  {selected} · {activityTime(selectedActivity?.milliseconds ?? 0, ja)}
+                  {dateLabel(new Date(`${selected}T00:00:00`))} · {activityTime(selectedActivity?.milliseconds ?? 0, ja)}
                 </h3>
                 <p className="mt-2 text-xs text-stone-400">
                   {ja ? "読んだ文字数（推定）" : "Characters read (estimated)"}:{" "}

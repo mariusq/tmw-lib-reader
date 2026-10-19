@@ -97,14 +97,34 @@ export function BookDetailsPanel({
     // `refresh` is scoped to this selected record; repeating it on every render would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
+  // Escape and backdrop clicks close the panel, but never silently discard unsaved corrections.
+  const dirty =
+    !!details &&
+    !!values &&
+    (JSON.stringify(values) !== JSON.stringify(details.overrideValues) ||
+      tagText !== details.tags.map(([, name]) => name).join(", "));
+  const requestClose = () => {
+    if (!dirty || window.confirm("Discard unsaved corrections?")) onClose();
+  };
+  useEffect(() => {
+    if (reading) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) requestClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   if (!details || !values)
     return (
-      <aside className="detail-panel">
-        <button className="text-stone-400" onClick={onClose}>
-          × Close
-        </button>
-        <p className="mt-6 text-stone-400">Loading book details…</p>
-      </aside>
+      <>
+        <div className="detail-backdrop" aria-hidden="true" onClick={onClose} />
+        <aside className="detail-panel">
+          <button className="text-stone-400" onClick={onClose}>
+            × Close
+          </button>
+          <p className="mt-6 text-stone-400">Loading book details…</p>
+        </aside>
+      </>
     );
   if (reading) return <EpubReader bookId={bookId} onClose={() => { setReading(false); onSaved(); }} />;
   const save = async () => {
@@ -170,6 +190,8 @@ export function BookDetailsPanel({
     }
   };
   return (
+    <>
+    <div className="detail-backdrop" aria-hidden="true" onClick={requestClose} />
     <aside className="detail-panel" aria-label="Book details">
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -180,8 +202,9 @@ export function BookDetailsPanel({
         </div>
         <button
           className="rounded p-2 text-stone-400 hover:bg-white/10"
-          onClick={onClose}
+          onClick={requestClose}
           aria-label="Close details"
+          title="Close (Esc)"
         >
           ×
         </button>
@@ -204,19 +227,21 @@ export function BookDetailsPanel({
           <p className="mt-1 text-amber-200">
             {[details.effectiveSeries, details.effectiveVolume].filter(Boolean).join(" · ")}
           </p>
-          <button
-            className="mt-4 text-amber-300 underline"
-            onClick={() =>
-              void invoke("open_book_folder", { path: details.book.parentFolderPath }).catch(
-                (reason) => setError(String(reason)),
-              )
-            }
-          >
-            Open folder
-          </button>
-          <button className="mt-2 block text-amber-300 underline" onClick={() => setReading(true)}>
-            Read book
-          </button>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button className="primary" onClick={() => setReading(true)}>
+              Read book
+            </button>
+            <button
+              className="rounded-xl border border-white/15 px-4 py-2 text-stone-200 hover:bg-white/5"
+              onClick={() =>
+                void invoke("open_book_folder", { path: details.book.parentFolderPath }).catch(
+                  (reason) => setError(String(reason)),
+                )
+              }
+            >
+              Open folder
+            </button>
+          </div>
         </div>
       </div>
       <section className="mt-5"><ReadingStatus bookId={bookId} onChanged={onSaved} /></section>
@@ -394,5 +419,6 @@ export function BookDetailsPanel({
         </button>
       </section>
     </aside>
+    </>
   );
 }
