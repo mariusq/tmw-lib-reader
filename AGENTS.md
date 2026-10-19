@@ -1,5 +1,14 @@
 # TMW EPUB Library — agent guide
 
+2026-10-19 generated placeholder covers (desktop): hidden, missing or broken covers in
+library/series grids and lists, Continue Reading, Want to read and Book Details now show
+a shared GeneratedCover: stable per-title hue gradient with the title (vertical right to
+left for Japanese; horizontal titles start in the upper third, clear of Series/selection badges), sized by container units. No cover files,
+cache or storage change; Android is unchanged. Approximately 5 minutes implementation
+and 3 minutes validation: desktop TypeScript, component lint, 25 component tests,
+frontend build and mocked-backend preview with covers hidden passed. Running-app
+acceptance pending.
+
 2026-10-19 desktop comfort pass: library and series grids use a responsive
 auto-fill grid (min 9rem cards; ~6 columns at 1280px instead of 4) with a subtle
 cover hover lift. Selection checkboxes appear on hover/focus or once any book is
@@ -624,7 +633,7 @@ stored device-locally as `tmw-reader-theme`. Existing desktop choices persist;
 Android defaults to Warm paper; phone recovery exports include the choice. Palette changes apply in place without navigation;
 fixed-layout EPUB content retains its original styling.
 
-Show covers is device-local `tmw-show-covers`, default on; off displays a generic default cover instead of the actual image. Android skips cover
+Show covers is device-local `tmw-show-covers`, default on; off displays a generic default cover instead of the actual image (desktop: a generated per-title colour cover with the title, also used when a cover is missing or broken). Android skips cover
 requests while hidden; toggling never regenerates or deletes cached covers. No flashcards/SRS/mastery/study queues;
 the user uses Jiten separately. Saved words are lightweight passage bookmarks.
 

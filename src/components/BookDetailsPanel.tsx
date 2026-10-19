@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { GeneratedCover } from "./GeneratedCover";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { ReadingStatus } from "./ReadingStatus";
 import { EpubReader } from "../features/reader/EpubReader";
@@ -218,7 +219,7 @@ export function BookDetailsPanel({
               alt=""
             />
           ) : (
-            <div className="grid h-full place-items-center text-2xl text-stone-500">本</div>
+            <GeneratedCover title={details.effectiveTitle} />
           )}
         </div>
         <div className="text-sm">

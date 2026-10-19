@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { GeneratedCover } from "./GeneratedCover";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { calendarDays, localDay, weekStart } from "../../packages/reader-core/readingActivity";
 import { ContinueReading } from "./ContinueReading";
@@ -499,7 +500,7 @@ export function ReadingHome({
                 onClick={() => setReaderId(book.id)}
                 aria-label={`${ja ? "開く" : "Open"}: ${book.effectiveTitle}`}
               >
-                <NextCover path={showCovers ? book.effectiveCoverPath : null} />
+                <NextCover path={showCovers ? book.effectiveCoverPath : null} title={book.effectiveTitle} />
                 <div className="min-w-0">
                   <h3 className="line-clamp-2 text-sm font-medium">{book.effectiveTitle}</h3>
                   <p className="mt-1 truncate text-xs text-stone-400">{book.effectiveCreator}</p>
@@ -530,7 +531,7 @@ export function ReadingHome({
     </section>
   );
 }
-function NextCover({ path }: { path: string | null }) {
+function NextCover({ path, title }: { path: string | null; title: string }) {
   const [broken, setBroken] = useState(false);
   return (
     <div className="home-next-cover">
@@ -543,7 +544,7 @@ function NextCover({ path }: { path: string | null }) {
           onError={() => setBroken(true)}
         />
       ) : (
-        <span>本</span>
+        <GeneratedCover title={title} />
       )}
     </div>
   );
