@@ -67,7 +67,8 @@ these features are in `AGENTS.md`; update this file whenever behavior changes.
 
 - Paginated single-page reading. Writing direction is Horizontal left to right
   or Vertical right to left; page-turn controls follow the direction.
-- Five palettes: Light, Warm paper, Sepia, Dusk and Dark. Font size controls.
+- Nine reading palettes: Light, Warm paper, Sepia, Pastel (trans-flag pastels), Matcha,
+  Dusk, Pastel night, Midnight and Dark. Font size controls.
   Hide furigana option. Illustrations fit the page.
 - A Go to chapter picker built from the book's own table of contents, including
   nested entries.
@@ -93,7 +94,8 @@ these features are in `AGENTS.md`; update this file whenever behavior changes.
 
 ## Android companion
 
-- Pairs privately with the PC over Tailscale Serve. Browses the full catalog
+- Pairs privately with the PC over Tailscale Serve. The desktop starts its private
+  connection automatically (can be turned off under Settings). Browses the full catalog
   offline, with search, filters and series consolidation, and downloads read-only
   copies.
 - Home shows Continue Reading/Resume, recent books (including books read only on
@@ -108,7 +110,9 @@ these features are in `AGENTS.md`; update this file whenever behavior changes.
 Settings has eight categories: General, Library Roots, Covers, Dictionaries,
 Android connection, Backup & restore (standalone SQLite backups, restore with
 an automatic pre-restore backup), Maintenance (search-index rebuild) and Licenses.
-The interface is available in English and Japanese.
+The interface is available in English and Japanese. General also picks the library
+color scheme: Dark (default), Pastel (trans-flag pastels), Pastel night, Matcha or
+Midnight; the reader keeps its own reading palette.
 
 ---
 

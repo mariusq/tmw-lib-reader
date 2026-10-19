@@ -24,3 +24,9 @@ it("preserves fixed-layout book styling", () => {
   applyReaderColors(doc, "dark", true);
   expect(doc.querySelector("[data-tmw-colors]")).toBeNull();
 });
+it("applies each palette's own link color", () => {
+  const doc = document.implementation.createHTMLDocument();
+  applyReaderColors(doc, "pastel");
+  expect(doc.querySelector("[data-tmw-colors]")?.textContent).toContain(`a {color:${readerThemes.pastel.link} !important;}`);
+  expect(readerTheme("pastelNight", "paper")).toBe("pastelNight");
+});

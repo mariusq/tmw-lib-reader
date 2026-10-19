@@ -236,7 +236,8 @@ furigana and palette changes recreate or restyle at the current CFI without
 navigation. Fixed-layout content retains publication styling. Device-local reader
 keys: `tmw-reader-theme`, `tmw-reader-font-size`, `tmw-reader-writing-mode`
 (legacy vertical-lr resolves to vertical-rl), `tmw-reader-hide-furigana`. Other
-device-local keys: `tmw-show-covers`, `tmw-library-layout`,
+device-local keys: `tmw-app-theme` (desktop library scheme; never applied inside
+`.desktop-reader`), `tmw-show-covers`, `tmw-library-layout`,
 `tmw-consolidate-series`, `tmw-series-confidence`, `tmw-series-group-copies`.
 Android recovery exports include its reader and series preferences.
 Desktop progress percentage uses epub.js 150-character CFI locations; hidden until
@@ -369,7 +370,9 @@ Recent-book IDs are bounded per catalog namespace in native settings.
 
 ## Private connection and synchronization
 
-Service is opt-in, disabled each desktop start, loopback `127.0.0.1:47831`.
+Service starts with the desktop by default (app setting `companion_autostart`;
+only "false" opts out; startup bind failures are logged, never fatal) and can be
+disabled in Settings; loopback `127.0.0.1:47831`.
 Private Tailscale Serve only; inspect existing configuration before changing it.
 Phone accepts validated root HTTPS `.ts.net` addresses on 443; no redirects,
 cleartext or certificate bypass. Credentials remain native Keystore AES-GCM,

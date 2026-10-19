@@ -857,6 +857,12 @@ fn companion_revoke(
 ) -> Result<(), String> {
     service.revoke(&device_id)
 }
+/// App setting that controls whether the private loopback service starts with the app.
+/// Absent means enabled; only an explicit "false" opts out.
+const COMPANION_AUTOSTART_KEY: &str = "companion_autostart";
+fn companion_autostart_enabled(value: Option<&str>) -> bool {
+    value != Some("false")
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -871,6 +877,23 @@ pub fn run() {
             app.manage(companion::Service::default());
             app.manage(IndexRebuildController::default());
             app.manage(tmw_japanese_core::dictionary_storage::Jobs::default());
+            let autostart = app
+                .state::<db::Database>()
+                .setting(COMPANION_AUTOSTART_KEY)
+                .ok()
+                .flatten();
+            if companion_autostart_enabled(autostart.as_deref()) {
+                if let Err(error) = app.state::<companion::Service>().enable(
+                    database_path.clone(),
+                    app_data.join("companion-devices.sqlite3"),
+                ) {
+                    services::logging::event(
+                        "warn",
+                        "companion_autostart_failed",
+                        &[("error", error)],
+                    );
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -948,4 +971,16 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running TMW Library");
+}
+
+#[cfg(test)]
+mod companion_autostart_tests {
+    use super::companion_autostart_enabled;
+
+    #[test]
+    fn autostart_defaults_on_and_respects_explicit_opt_out() {
+        assert!(companion_autostart_enabled(None));
+        assert!(companion_autostart_enabled(Some("true")));
+        assert!(!companion_autostart_enabled(Some("false")));
+    }
 }
