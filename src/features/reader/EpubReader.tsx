@@ -1,3 +1,5 @@
+import { localDay } from "../../../packages/reader-core/readingActivity";
+import { useReadingActivity } from "./useReadingActivity";
 import { READER_FURIGANA_KEY, applyReaderFurigana } from "../../../packages/reader-core/readerFurigana";
 import { READER_WRITING_KEY, readerWriting, applyReaderWriting } from "../../../packages/reader-core/readerWriting";
 import { READER_THEME_KEY, readerThemes, readerTheme, applyReaderColors, type ReaderTheme } from "../../../packages/reader-core/readerTheme";
@@ -18,8 +20,9 @@ import type { ChunkDictionaryEntry, ChunkLookupResponse } from "../../../package
 import DictionaryGlossary from "../../../packages/reader-core/DictionaryGlossary";
 import DictionaryManager from "../../../packages/reader-core/DictionaryManager";
 import ChapterPicker, { type Chapter } from "../../../packages/reader-core/ChapterPicker";
+import { PositionSync, type PositionSnapshot } from "./positionSync";
 
-type ReaderBook = { id: number; filePath: string; title: string };
+type ReaderBook = { id: number; filePath: string; title: string; contentKey: string };
 type Theme = ReaderTheme;
 const FONT_MIN = 80;
 const FONT_MAX = 180;
@@ -69,8 +72,11 @@ function ReaderSession({
   const rendition = useRef<Rendition | null>(null);
   const book = useRef<Book | null>(null);
   const fixedLayout = useRef(false);
-  const saveTimer = useRef<number | null>(null);
   const latestLocation = useRef<string | null>(null);
+  const positionSync = useRef<PositionSync | null>(null);
+  const navigationIntent = useRef<{ view: Rendition; pending: boolean; active: number } | null>(null);
+  const suppressPosition = useRef(false);
+  const [remotePosition, setRemotePosition] = useState<PositionSnapshot | null>(null);
   const advanceRef = useRef<() => Promise<void>>(async () => {});
   const retreatRef = useRef<() => Promise<void>>(async () => {});
   const [readerBook, setReaderBook] = useState<ReaderBook | null>(null);
@@ -82,6 +88,8 @@ function ReaderSession({
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const [activityReady, setActivityReady] = useState(false);
+  const prepareActivityAdvance = useReadingActivity(bookId, !busy && activityReady, rendition, setError, readerBook?.contentKey, fixedLayout);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chaptersReady, setChaptersReady] = useState(false);
   const [chapterPending, setChapterPending] = useState(false);
@@ -126,6 +134,7 @@ function ReaderSession({
     surface: string,
     generation: number,
     anchor?: { cfi: string; sentence: string },
+    activityGeneration?: Promise<unknown>,
   ) {
     if (entries.length === 0 || generation !== lookupGeneration.current) return;
     // Multiple senses can share an identity. Different headwords/readings remain unresolved.
@@ -136,8 +145,12 @@ function ReaderSession({
     try {
       const dictionaryId = reliable ? await portableDictionaryId(first.provenance) : null;
       if (generation !== lookupGeneration.current) return;
+      const epoch = await activityGeneration;
+      if (generation !== lookupGeneration.current) return;
       const count = await invoke<number | null>("record_lookup_history", {
         request: {
+          activityDay: localDay(new Date()),
+          ...(typeof epoch === "string" ? {activityGeneration: epoch} : {}),
           surface,
           entryId: null,
           headword: reliable ? first.term : null,
@@ -157,6 +170,7 @@ function ReaderSession({
 
   async function lookupDictionary(query: string) {
     const generation = ++lookupGeneration.current;
+    const activityGeneration = invoke<unknown>("get_reading_activity_generation").catch(() => undefined);
     setDictionaryQuery(query);
     setDictionaryOpen(true);
     setDictionaryError(null);
@@ -169,7 +183,7 @@ function ReaderSession({
       const entries = response.groups.flatMap(group => group.matches.map(match => match.entry));
       if (generation === lookupGeneration.current) {
         setDictionaryEntries(entries);
-        await recordLookup(entries, query, generation);
+        await recordLookup(entries, query, generation, undefined, activityGeneration);
       }
     } catch (reason) {
       if (generation === lookupGeneration.current) {
@@ -181,6 +195,7 @@ function ReaderSession({
 
   async function lookupTarget(text: string, offset: number, cfi: string) {
     const generation = ++lookupGeneration.current;
+    const activityGeneration = invoke<unknown>("get_reading_activity_generation").catch(() => undefined);
     setLookupCount(null);
     setHistoryError(null);
     setSelection({ surface: japaneseWordAt(text, offset), cfi });
@@ -204,7 +219,7 @@ function ReaderSession({
         await recordLookup(entries, target.surface, generation, {
           cfi,
           sentence: sentenceAt(text, offset),
-        });
+        }, activityGeneration);
       }
     } catch (reason) {
       if (generation !== lookupGeneration.current) return;
@@ -226,18 +241,41 @@ function ReaderSession({
     finally { setSavingPassage(false); }
   }
 
+  // epub.js reports relocation on an animation frame, after display/turn resolves.
+  // Expire intent after that frame so a no-op/failed turn cannot arm a later reflow.
+  async function navigate(view: Rendition, action: () => Promise<unknown>) {
+    if (rendition.current !== view || suppressPosition.current) return;
+    // Rapid turns share the in-flight intent rather than being dropped.
+    const intent = navigationIntent.current?.view === view ? navigationIntent.current : { view, pending: true, active: 0 };
+    intent.pending = true;
+    intent.active++;
+    navigationIntent.current = intent;
+    positionSync.current?.navigate();
+    try {
+      await action();
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    } finally {
+      if (--intent.active === 0 && navigationIntent.current === intent) navigationIntent.current = null;
+    }
+  }
+
   async function advance() {
     const view = rendition.current;
     if (!view) return;
+    const recordCharacters = prepareActivityAdvance.current();
     try {
-      await turnReaderPage(view, "next", {
+      await navigate(view, () => turnReaderPage(view, "next", {
         location: () => view.currentLocation(),
         nextSection: async (index) => {
           if (rendition.current !== view) return;
           const next = book.current?.spine.get(index)?.next();
-          if (next?.href) await view.display(next.href);
+          if (next?.href) {
+            if (navigationIntent.current?.view === view) navigationIntent.current.pending = true;
+            await view.display(next.href);
+          }
         },
-      });
+      }));
+      recordCharacters();
     } catch (reason) {
       setError(`Could not turn the page: ${String(reason)}`);
     }
@@ -245,7 +283,8 @@ function ReaderSession({
 
   async function retreat() {
     try {
-      if (rendition.current) await turnReaderPage(rendition.current, "previous");
+      const view = rendition.current;
+      if (view) await navigate(view, () => turnReaderPage(view, "previous"));
     } catch (reason) {
       setError(`Could not turn the page: ${String(reason)}`);
     }
@@ -255,8 +294,13 @@ function ReaderSession({
     retreatRef.current = retreat;
   });
 
+  useEffect(() => () => { positionSync.current = null; }, []);
+
   useEffect(() => {
     let disposed = false;
+    let opening = true;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    const refresh = () => { if (!disposed && document.visibilityState === "visible") void positionSync.current?.refresh(); };
     const resumeCfi = latestLocation.current;
     latestLocation.current = null;
     const open = async () => {
@@ -266,9 +310,24 @@ function ReaderSession({
         if (disposed || !host.current) return;
         setProgress(null);
         setBusy(true);
+        setActivityReady(false);
         setReaderBook(selected);
-        const savedLocation = await invoke<string | null>("get_reading_location", { bookId });
+        const existingSync = positionSync.current;
+        const saved = existingSync?.snapshot ?? await invoke<PositionSnapshot>("get_reader_position", { bookId });
         if (disposed || !host.current) return;
+        const sync: PositionSync = existingSync ?? new PositionSync(saved,
+          () => invoke<PositionSnapshot>("get_reader_position", { bookId }),
+          (locationCfi, expectedToken) => invoke<PositionSnapshot>("save_reader_position", { bookId, locationCfi, expectedToken }),
+          next => { if (positionSync.current === sync) setRemotePosition(next); },
+          reason => { if (positionSync.current === sync) setError(`Could not sync reading position: ${String(reason)}`); },
+          async next => {
+            const currentView = rendition.current;
+            if (!currentView) throw new Error("Reader is not ready.");
+            suppressPosition.current = true;
+            try { await currentView.display(next.locationCfi ?? undefined); }
+            finally { suppressPosition.current = false; }
+          });
+        positionSync.current = sync;
         const instance = ePub(convertFileSrc(selected.filePath));
         book.current = instance;
         void instance.loaded?.navigation.then((navigation) => {
@@ -307,22 +366,27 @@ function ReaderSession({
           const cfi = position.start?.cfi;
           if (!cfi) return;
           latestLocation.current = cfi;
-          if (saveTimer.current) window.clearTimeout(saveTimer.current);
-          saveTimer.current = window.setTimeout(() => {
-            void invoke("save_reading_location", { bookId, locationCfi: cfi }).catch((reason) =>
-              setError(`Could not save reading position: ${String(reason)}`),
-            );
-          }, 700);
+          const intent = navigationIntent.current;
+          if (!opening && !suppressPosition.current && intent?.view === view && intent.pending) {
+            intent.pending = false;
+            positionSync.current?.save(cfi);
+          }
         });
         view.on("rendered", () => { applyAppearance(view, theme, fontSize, fixedLayout.current); attachDictionaryHandlers(view, dictionaryEnabled, dictionaryModifier, lookupTarget, dismissDictionary); });
         view.on("keydown", (event) =>
           handleReaderKey(event as KeyboardEvent, advanceRef.current, retreatRef.current, onClose, writing),
         );
         applyAppearance(view, theme, fontSize, fixedLayout.current);
-        await view.display(resumeCfi ?? initialCfi ?? savedLocation ?? undefined);
+        await view.display(resumeCfi ?? initialCfi ?? saved.locationCfi ?? undefined);
         if (disposed) return;
+        opening = false;
+        if (initialCfi && !resumeCfi) positionSync.current?.save(initialCfi);
+        if (existingSync) refresh();
+        poll = setInterval(refresh, 5000);
+        window.addEventListener("focus", refresh);
+        document.addEventListener("visibilitychange", refresh);
         const completed = await invoke<boolean>("record_reader_open", { bookId });
-        if (!disposed) { setFinished(completed); setBusy(false); }
+        if (!disposed) { setFinished(completed); setBusy(false); setActivityReady(true); }
       } catch (reason) {
         if (!disposed) {
           setError(
@@ -335,10 +399,10 @@ function ReaderSession({
     void open();
     return () => {
       disposed = true;
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      if (latestLocation.current) {
-        void invoke("save_reading_location", { bookId, locationCfi: latestLocation.current });
-      }
+      clearInterval(poll);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      navigationIntent.current = null;
       rendition.current?.destroy();
       book.current?.destroy();
       rendition.current = null;
@@ -375,6 +439,23 @@ function ReaderSession({
       className={`desktop-reader fixed inset-0 z-50 flex flex-col ${readerThemes[theme].dark ? "bg-stone-950 text-stone-100" : "bg-stone-100 text-stone-900"}`}
       aria-label="EPUB reader"
     >
+      {remotePosition && <div role="status" className="flex flex-wrap items-center gap-3 border-b p-3">
+        <span>Reading position updated on another device.</span>
+        <button className="reader-control" disabled={!remotePosition.locationCfi} onClick={() => {
+          const sync = positionSync.current;
+          if (!sync || !rendition.current) return;
+          suppressPosition.current = true;
+          void sync.follow(async next => {
+            await rendition.current?.display(next.locationCfi ?? undefined);
+          }).then(() => {
+            setRemotePosition(null);
+          }).catch(reason => setError(String(reason))).finally(() => { suppressPosition.current = false; });
+        }}>Go to synced position</button>
+        <button className="reader-control" onClick={() => {
+          const cfi = latestLocation.current;
+          if (cfi) void positionSync.current?.keep(cfi).then(() => setRemotePosition(null)).catch(reason => setError(String(reason)));
+        }}>Keep this position</button>
+      </div>}
       <header
         style={{ background: readerThemes[theme].background }}
         className={`flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3 ${readerThemes[theme].dark ? "border-white/10 bg-stone-900" : "border-stone-300 bg-white"}`}
@@ -399,7 +480,7 @@ function ReaderSession({
               lookupGeneration.current++;
               setDictionaryOpen(false);
               setChapterPending(true);
-              void view.display(href).catch((reason) => {
+              void navigate(view, () => view.display(href)).catch((reason) => {
                 if (rendition.current === view) setError(`Could not open chapter: ${String(reason)}`);
               }).finally(() => { if (rendition.current === view) setChapterPending(false); });
             }} />
@@ -590,7 +671,8 @@ function ReaderSession({
               bookId={bookId}
               onJump={async (_passage, cfi) => {
                 if (!rendition.current) throw new Error("Reader is not ready.");
-                await rendition.current.display(cfi);
+                const view = rendition.current;
+                await navigate(view, () => view.display(cfi));
                 setPassagesOpen(false);
               }}
             />
@@ -611,7 +693,8 @@ function ReaderSession({
                   return;
                 }
                 if (!rendition.current) throw new Error("Reader is not ready.");
-                await rendition.current.display(cfi);
+                const view = rendition.current;
+                await navigate(view, () => view.display(cfi));
                 setHistoryOpen(false);
               }}
             />

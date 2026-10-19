@@ -13,7 +13,8 @@ import java.util.zip.ZipOutputStream
 internal object RecoveryExport {
     val tables = listOf("settings", "catalog", "downloads", "user_records", "user_queue",
         "user_sync", "user_rejected", "user_device", "user_epoch", "user_provisional",
-        "lookup_history", "lookup_settings")
+        "lookup_history", "lookup_settings", "activity_state", "activity_events", "activity_totals",
+        "activity_time", "activity_coverage", "activity_settings")
 
     fun write(db: SQLiteDatabase, output: OutputStream, webState: JSONObject) {
         require(webState.toString().toByteArray(Charsets.UTF_8).size <= 2_000_000) { "Reader settings exceed export limit" }

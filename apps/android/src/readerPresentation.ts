@@ -11,12 +11,20 @@ export function prepareReaderDocument(doc: Document, fontSize: number, fixedLayo
   const html = doc.documentElement;
   const body = doc.body ?? doc.querySelector("body");
   if (!body || fixedLayout) return;
+  // Android's generic CJK fallback needs a Japanese locale even when the
+  // publication omits (or incorrectly declares) its document language.
+  for (const element of [html, body]) {
+    element.setAttribute("lang", "ja");
+    element.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:lang", "ja");
+  }
   html.style.setProperty("writing-mode", mode, "important");
   html.style.setProperty("direction", "ltr", "important");
   const style = doc.createElement("style");
   style.setAttribute("data-tmw-reader", "");
   style.textContent = `html {color-scheme:light; background:#faf7ef !important;}
-    html, body, body * {writing-mode:${mode} !important;
+    html, body, body * {-webkit-locale:"ja" !important;
+      font-family:"Noto Serif CJK JP","Noto Serif JP",serif !important;
+      writing-mode:${mode} !important;
       -epub-writing-mode:${mode} !important; -webkit-writing-mode:${mode} !important;
       direction:ltr !important; text-orientation:mixed !important;}
     body {color:#292524 !important; background:#faf7ef !important;

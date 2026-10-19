@@ -12,7 +12,7 @@ import { sentenceAt } from "../../../packages/reader-core/passageContext";
 import { readerRenditionOptions } from "../../../packages/reader-core/readerConfig";
 import { turnReaderPage, type PageLocation } from "../../../packages/reader-core/readerNavigation";
 import { localBook, type LocalBook } from "./localBook";
-import { readUserState, saveUserData } from "./userData";
+import { mobileUser, readUserState, saveUserData, type UserState } from "./userData";
 import SavedPassages from "./SavedPassages";
 import LookupHistory from "./LookupHistory";
 import { recordLookup, readerLookupResult, type LookupResult as Result } from "./historyData";
@@ -21,6 +21,22 @@ import DictionaryManager from "../../../packages/reader-core/DictionaryManager";
 import { FONT_SIZE_KEY, readerFontSize, prepareReaderDocument } from "./readerPresentation";
 import type { LookupResponse } from "../../../packages/reader-core/dictionaryLookup";
 import ChapterPicker, { type Chapter } from "../../../packages/reader-core/ChapterPicker";
+import { trackAndroidReading, prepareActivityLookup } from "./readingActivity";
+
+type ProgressSession = {
+  book: LocalBook;
+  dirty: boolean;
+  pendingCfi: string;
+  syncedCfi: string;
+  lastSubmitted: string;
+  savingCfi: string;
+  conflictCfi: string;
+  opening: boolean;
+  checking: boolean;
+  writing: Promise<void> | null;
+  preparing: Promise<UserState> | null;
+};
+
 export default function Reader({
   selected,
   onLocalSelection,
@@ -38,6 +54,15 @@ export default function Reader({
   const checkpoint = useRef<() => void>(() => {});
   const anchor = useRef("");
   const repaginating = useRef(false);
+  const readerForeground = useRef(true);
+  const progressSession = useRef<ProgressSession | null>(null);
+  const navigation = useRef<{ rendition: Rendition } | null>(null);
+  const checkPosition = useRef<() => void>(() => {});
+  const keepPosition = useRef<() => void>(() => {});
+  const goToSynced = useRef<() => void>(() => {});
+  const [positionConflict, setPositionConflict] = useState("");
+  const [syncNotice, setSyncNotice] = useState("");
+  const activity = useRef<ReturnType<typeof trackAndroidReading> | null>(null);
   const [fontSize, setFontSize] = useState(() =>
     readerFontSize(localStorage.getItem(FONT_SIZE_KEY)),
   );
@@ -75,9 +100,14 @@ export default function Reader({
     if (!text) return;
     const current = ++manualGeneration.current;
     setManualBusy(true); setManualError(""); setManualResult(undefined);
+    const creditLookup = prepareActivityLookup(book);
     try {
       const response = await invoke<LookupResponse & Result>("lookup_text", { text, offset: 0 });
-      if (manualGeneration.current === current) setManualResult(readerLookupResult(response));
+      if (manualGeneration.current === current) {
+        const result = readerLookupResult(response);
+        setManualResult(result);
+        if (result.entries.length) void creditLookup().catch(reason => setManualError(`Activity save failed: ${String(reason)}`));
+      }
     } catch (reason) {
       if (manualGeneration.current === current) setManualError(String(reason));
     } finally {
@@ -98,6 +128,12 @@ export default function Reader({
   const [status, setStatus] = useState(
     "Choose a local EPUB copy (up to 64 MB). It stays on this device.",
   );
+  const [resumeRevision, setResumeRevision] = useState(0);
+  useEffect(() => {
+    if (!syncNotice) return;
+    const timer = setTimeout(() => setSyncNotice(""), 4000);
+    return () => clearTimeout(timer);
+  }, [syncNotice]);
   useEffect(() => {
     const back = () => {
       dialog.current?.close();
@@ -108,9 +144,14 @@ export default function Reader({
   }, []);
   useEffect(() => {
     const save = () => checkpoint.current();
+    let paused = false;
     const lifecycle = (event: Event) => {
-      if ((event as CustomEvent).detail === "pause") save();
-      else if ((event as CustomEvent).detail === "resume") {
+      const state = (event as CustomEvent).detail;
+      if (state === "pause") { paused = true; readerForeground.current = false; save(); }
+      else if (state === "resume" || (state === "foreground" && paused)) {
+        readerForeground.current = true;
+        paused = false;
+        setResumeRevision(value => value + 1);
         window.dispatchEvent(new Event("resize"));
       }
     };
@@ -137,6 +178,16 @@ export default function Reader({
     let disposed = false;
     const locationKey = `tmw-local-cfi-${book.id ?? "legacy"}`;
     let initialCfi = localStorage.getItem(locationKey);
+    // Keep held/failed navigation across foreground and presentation reopens.
+    const progress: ProgressSession = progressSession.current?.book === book ? progressSession.current : {
+      book, dirty: false, pendingCfi: "", syncedCfi: "", lastSubmitted: "",
+      savingCfi: "", conflictCfi: "", opening: true, checking: false,
+      writing: null, preparing: null,
+    } satisfies ProgressSession;
+    progressSession.current = progress;
+    progress.opening = true;
+    setPositionConflict(progress.conflictCfi);
+    setSyncNotice("");
     const instance = createReaderBook(book.bytes);
     setChapters([]);
     setChaptersReady(false);
@@ -144,24 +195,127 @@ export default function Reader({
     void instance.loaded?.navigation.then((navigation) => {
       if (!disposed) { setChapters(navigation.toc); setChaptersReady(true); }
     }).catch(() => { if (!disposed) setChaptersReady(true); });
-    let lastSubmitted = "";
-    const persist = (cfi: string) => {
-      if (!cfi || cfi === lastSubmitted) return;
-      anchor.current = cfi;
+    let opening = true;
+    let displayedCfi: string | undefined;
+    const conflict = (cfi: string) => {
+      progress.conflictCfi = cfi;
+      if (!disposed) setPositionConflict(cfi);
+    };
+    const flushProgress = () => {
+      const cfi = progress.pendingCfi;
+      if (!progress.dirty || !cfi || progress.opening || progress.checking ||
+          progress.conflictCfi || progress.writing || repaginating.current) return;
+      if (cfi === progress.lastSubmitted) {
+        progress.dirty = false;
+        progress.pendingCfi = "";
+        return;
+      }
       localStorage.setItem(locationKey, cfi);
-      lastSubmitted = cfi;
-      if (book.catalog)
-        void saveUserData(book.catalog, "progress", { locationCfi: cfi }).catch((e) => {
-          // Permit retry on pause/resume without coalescing ordered native writes.
-          if (lastSubmitted === cfi) lastSubmitted = "";
+      progress.lastSubmitted = cfi;
+      if (!book.catalog) {
+        progress.dirty = false;
+        progress.pendingCfi = "";
+        return;
+      }
+      progress.savingCfi = cfi;
+      let succeeded = false;
+      progress.writing = saveUserData(book.catalog, "progress", { locationCfi: cfi })
+        .then(() => {
+          succeeded = true;
+          progress.syncedCfi = cfi;
+          if (progress.pendingCfi === cfi) { progress.dirty = false; progress.pendingCfi = ""; }
+        }).catch((e) => {
+          progress.lastSubmitted = "";
           if (!disposed) setError(`Progress save failed: ${String(e)}`);
+        }).finally(() => {
+          progress.writing = null;
+          progress.savingCfi = "";
+          // Serialize/coalesce newer turns; a failed write waits for a checkpoint retry.
+          if (succeeded) flushProgress();
         });
     };
     checkpoint.current = () => {
-      if (repaginating.current) return;
+      if (opening || repaginating.current) return;
       const location = view.current?.currentLocation() as unknown as PageLocation;
-      persist(location?.start?.cfi ?? anchor.current);
+      anchor.current = location?.start?.cfi ?? anchor.current;
+      // Reflow can move the page start. Only a deliberate relocation supplies
+      // pendingCfi; lifecycle/layout checkpoints must never invent a user write.
+      flushProgress();
     };
+    const prepare = async () => {
+      await progress.preparing?.catch(() => {});
+      await progress.writing;
+      if (disposed) return undefined;
+      const request = mobileUser<UserState>({ action: "userPrepareOpen", ...book.catalog });
+      progress.preparing = request;
+      try { return await request; }
+      finally { if (progress.preparing === request) progress.preparing = null; }
+    };
+    const remoteCfi = (state?: UserState) => state?.progress && !state.progress.deleted &&
+      state.progress.contentVersion === book.catalog?.version ? state.progress.fields.locationCfi : undefined;
+    const isRemoteChange = (cfi: string) => cfi !== progress.syncedCfi &&
+      cfi !== progress.pendingCfi && cfi !== progress.savingCfi;
+    const follow = async (cfi: string) => {
+      const rendition = view.current;
+      if (!cfi || disposed || !rendition || repaginating.current || navigation.current) return;
+      clearTimeout(resizeTimer);
+      repaginating.current = true;
+      generation.current++; activity.current?.invalidate();
+      try {
+        await rendition.display(cfi);
+        if (disposed || view.current !== rendition) return;
+        const location = rendition.currentLocation() as unknown as PageLocation;
+        anchor.current = location?.start?.cfi ?? cfi;
+        progress.syncedCfi = cfi;
+        progress.lastSubmitted = anchor.current;
+        progress.pendingCfi = "";
+        progress.dirty = false;
+        conflict("");
+        setSyncNotice("Moved to synced reading position.");
+      } catch {
+        if (!disposed) conflict(cfi);
+      } finally {
+        if (!disposed) repaginating.current = false;
+      }
+    };
+    const check = async () => {
+      if (!book.catalog || disposed || opening || repaginating.current ||
+          !readerForeground.current || document.visibilityState !== "visible" || progress.checking || progress.preparing) return;
+      progress.checking = true;
+      try {
+        const cfi = remoteCfi(await prepare());
+        if ((disposed && progress.opening) || repaginating.current || !cfi || !isRemoteChange(cfi)) return;
+        if (progress.dirty || navigation.current || progress.conflictCfi) conflict(cfi);
+        else if (!disposed) await follow(cfi);
+      } catch {
+        // Offline/timeout checks must not interrupt reading or flood the UI.
+      } finally {
+        progress.checking = false;
+        // Closing during a check still flushes confirmed local navigation when
+        // the result agrees (or the PC is offline). A reopen owns its own check.
+        if (!progress.opening) flushProgress();
+      }
+    };
+    checkPosition.current = () => { void check(); };
+    keepPosition.current = () => {
+      if (!progress.conflictCfi || repaginating.current || navigation.current) return;
+      const location = view.current?.currentLocation() as unknown as PageLocation;
+      progress.pendingCfi = location?.start?.cfi ?? anchor.current;
+      progress.dirty = true;
+      progress.syncedCfi = progress.conflictCfi;
+      progress.lastSubmitted = ""; // Keeping the same CFI is an explicit new write.
+      conflict("");
+      flushProgress();
+    };
+    goToSynced.current = () => { void follow(progress.conflictCfi); };
+    const visible = () => { if (document.visibilityState === "visible") void check(); };
+    const foreground = (event: Event) => {
+      if ((event as CustomEvent).detail === "foreground") void check();
+    };
+    const checkTimer = book.catalog ? setInterval(() => { void check(); }, 10000) : undefined;
+    document.addEventListener("visibilitychange", visible);
+    window.addEventListener("focus", visible);
+    window.addEventListener("tmw-lifecycle", foreground);
     instance.spine?.hooks.content.register((doc: Document) => {
       prepareReaderDocument(
         doc,
@@ -176,6 +330,7 @@ export default function Reader({
     let observer: ResizeObserver | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resize = () => {
+      if (opening) return;
       checkpoint.current();
       const cfi = anchor.current;
       clearTimeout(resizeTimer);
@@ -184,6 +339,7 @@ export default function Reader({
         const box = host.current?.getBoundingClientRect();
         if (disposed || !rendition || !box?.width || !box.height) return;
         repaginating.current = true;
+        generation.current++; activity.current?.invalidate();
         rendition.resize(Math.round(box.width), Math.round(box.height));
         void rendition
           .display(cfi || undefined)
@@ -201,11 +357,27 @@ export default function Reader({
       observer.observe(host.current);
     }
     async function start() {
+      setError("");
       if (book?.catalog) {
         try {
-          const state = await readUserState(book.catalog);
-          if (state.progress?.contentVersion === book.catalog.version && !state.progress.deleted)
-            initialCfi = state.progress.fields.locationCfi ?? initialCfi;
+          setStatus("Checking PC reading position…");
+          let state: UserState | undefined;
+          try {
+            state = await prepare();
+          } catch (reason) {
+            if (disposed) return;
+            setError(`Could not check the PC reading position. Opening the saved position. ${String(reason)}`);
+            state = await readUserState(book.catalog);
+          }
+          if (disposed) return;
+          const cfi = remoteCfi(state);
+          if (progress.dirty || progress.conflictCfi) {
+            if (cfi && isRemoteChange(cfi)) conflict(cfi);
+            initialCfi = progress.pendingCfi || anchor.current || initialCfi;
+          } else if (cfi) {
+            initialCfi = cfi;
+            progress.syncedCfi = cfi;
+          }
         } catch (e) {
           if (!disposed) setError(`Local progress could not be loaded: ${String(e)}`);
         }
@@ -285,6 +457,7 @@ export default function Reader({
             const text = chars.slice(start, start + 8000).join("");
             const offset = target.offset - start;
             const current = ++generation.current;
+            const creditLookup = prepareActivityLookup(book);
             const context = sentenceAt(text, offset);
             setSentence(context);
             let cfi = "";
@@ -310,6 +483,7 @@ export default function Reader({
                 const r = readerLookupResult(response);
                 if (generation.current === current && !disposed) {
                   setResult(r);
+                  if (r.entries.length > 0) void creditLookup().catch(e => { if (!disposed) setSaveMessage(`Activity save failed: ${String(e)}`); });
                   // Display definitions first; persistence runs on the native local executor.
                   if (r.entries.length > 0) void recordLookup(book!, r, context, cfi).catch((e) => {
                     if (!disposed) setSaveMessage(`History save failed: ${String(e)}`);
@@ -324,7 +498,13 @@ export default function Reader({
         },
       );
       rendition.on("relocated", (location: { start: { cfi: string } }) => {
-        if (!disposed && !repaginating.current) persist(location.start.cfi);
+        if (disposed) return;
+        anchor.current = location.start.cfi;
+        if (opening) displayedCfi = location.start.cfi;
+        else if (!repaginating.current && navigation.current?.rendition === rendition) {
+          progress.dirty = true;
+          progress.pendingCfi = location.start.cfi;
+        }
       });
       try {
         await rendition.display(initialCfi ?? undefined);
@@ -332,28 +512,49 @@ export default function Reader({
         await rendition.display();
       }
       if (!disposed) {
+        // Opening/reflow can round a CFI to the page start. Merely displaying a
+        // cached position must never become a new last-write-wins phone update.
+        const location = rendition.currentLocation() as unknown as PageLocation;
+        anchor.current = location?.start?.cfi ?? displayedCfi ?? initialCfi ?? "";
+        if (!progress.dirty) progress.lastSubmitted = anchor.current;
+        opening = false;
+        progress.opening = false;
+        flushProgress();
+        activity.current = trackAndroidReading(rendition, book!, instance.packaging?.metadata?.layout === "pre-paginated", message => { if (!disposed) setError(message); });
         setStatus(book!.name);
-        if (book?.catalog) void invoke("mobile_storage", { args: { action: "markOpened", ns: book.catalog.ns, id: book.catalog.id } }).catch(() => {});
+        if (book?.catalog) void invoke("mobile_storage", { args: { action: "markOpened", ns: book.catalog.ns, id: book.catalog.id } })
+          .then(() => window.dispatchEvent(new Event("tmw-reader-opened")))
+          .catch(reason => { if (!disposed) setError(`Could not update recent reading: ${String(reason)}`); });
       }
     }
     void start().catch((e) => {
       if (!disposed) setError(`Could not open EPUB: ${String(e)}`);
     });
     return () => {
+      activity.current?.stop(); activity.current = null;
       checkpoint.current();
       checkpoint.current = () => {};
+      checkPosition.current = () => {};
+      keepPosition.current = () => {};
+      goToSynced.current = () => {};
       disposed = true;
+      navigation.current = null;
       repaginating.current = false;
       generation.current++;
       observer?.disconnect();
       window.removeEventListener("resize", resize);
       clearTimeout(resizeTimer);
+      clearInterval(checkTimer);
+      document.removeEventListener("visibilitychange", visible);
+      window.removeEventListener("focus", visible);
+      window.removeEventListener("tmw-lifecycle", foreground);
       view.current?.destroy();
       view.current = null;
       instance.destroy();
     };
-  }, [book, writing, hideFurigana]);
+  }, [book, writing, hideFurigana, resumeRevision]);
   function changeFont(size: number) {
+    activity.current?.invalidate();
     checkpoint.current();
     const cfi = anchor.current;
     localStorage.setItem(FONT_SIZE_KEY, String(size));
@@ -396,21 +597,52 @@ export default function Reader({
   }
   async function turn(direction: "next" | "previous") {
     const rendition = view.current;
-    if (!rendition) return;
-    generation.current++;
+    if (!rendition || repaginating.current || chapterPending || navigation.current) return;
+    const current = ++generation.current;
+    const credit = direction === "next" ? activity.current?.prepare() : undefined;
     dialog.current?.close();
     try {
-      await turnReaderPage(rendition, direction, {
+      await navigate(rendition, () => turnReaderPage(rendition, direction, {
         // epub.js's public declaration describes one endpoint, while the runtime returns start/end.
         location: () => rendition.currentLocation() as unknown as PageLocation,
         nextSection: async (index) => {
           const next = rendition.book.spine.get(index)?.next();
           if (next?.href && view.current === rendition) await rendition.display(next.href);
         },
-      });
+      }));
+      if (generation.current === current && view.current === rendition && !repaginating.current) credit?.();
     } catch (e) {
       setError(String(e));
     }
+  }
+  async function navigate(rendition: Rendition, operation: () => Promise<unknown>) {
+    if (navigation.current || repaginating.current || progressSession.current?.opening) return;
+    // No per-turn PC check: holding a save behind a network round trip would
+    // risk losing it offline. Periodic/foreground checks detect PC changes.
+    const ticket = { rendition };
+    const progress = progressSession.current;
+    const previous = progress && { dirty: progress.dirty, pendingCfi: progress.pendingCfi };
+    navigation.current = ticket;
+    try {
+      await operation();
+      // epub.js reports relocation on an animation frame after display resolves.
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    } catch (reason) {
+      if (progress && previous && navigation.current === ticket) Object.assign(progress, previous);
+      throw reason;
+    } finally {
+      if (navigation.current === ticket) {
+        navigation.current = null;
+        if (view.current === rendition) checkpoint.current();
+      }
+    }
+  }
+  function jump(cfi: string) {
+    const rendition = view.current;
+    if (!rendition) return;
+    activity.current?.invalidate();
+    generation.current++;
+    void navigate(rendition, () => rendition.display(cfi)).catch(e => setError(String(e)));
   }
   async function savePassage(bookmark = false) {
     if (!book?.catalog || saving) return;
@@ -437,6 +669,16 @@ export default function Reader({
   return (
     <section className="reader-screen" style={{ background: readerThemes[theme].background, color: readerThemes[theme].foreground }}>
       <div ref={host} className="reader-host" aria-label="Book pages" />
+      {(positionConflict || syncNotice) && <div className="reader-sync" role="status"
+        style={{ background: readerThemes[theme].background, color: readerThemes[theme].foreground }}>
+        {positionConflict ? <>
+          <p>Reading position updated on another device.</p>
+          <div className="flex flex-wrap gap-2">
+            <button className="control" onClick={() => goToSynced.current()}>Go to synced position</button>
+            <button className="control" onClick={() => keepPosition.current()}>Keep this position</button>
+          </div>
+        </> : syncNotice}
+      </div>}
       <nav style={{ background: readerThemes[theme].background, color: readerThemes[theme].foreground }} className="reader-page-bar" aria-label="Page navigation">
         <button aria-label={writing === "vertical-rl" ? "Next page" : "Previous page"} disabled={!book} onClick={() => void turn(writing === "vertical-rl" ? "next" : "previous")}>
           {writing === "vertical-rl" ? "← Next" : "← Previous"}
@@ -520,10 +762,11 @@ export default function Reader({
               const rendition = view.current;
               if (!rendition || chapterPending) return;
               checkpoint.current();
+              activity.current?.invalidate();
               generation.current++;
               dialog.current?.close();
               setChapterPending(true);
-              void rendition.display(href).then(() => {
+              void navigate(rendition, () => rendition.display(href)).then(() => {
                 if (view.current === rendition) { checkpoint.current(); menu.current?.close(); }
               }).catch((e) => {
                 if (view.current === rendition) setError(`Could not open chapter: ${String(e)}`);
@@ -588,7 +831,7 @@ export default function Reader({
               book={book.catalog}
               revision={savedRevision}
               onJump={(cfi) => {
-                void view.current?.display(cfi).catch((e) => setError(String(e)));
+                jump(cfi);
               }}
             />
           </>
@@ -605,7 +848,7 @@ export default function Reader({
           <LookupHistory
             book={book}
             onJump={(cfi) => {
-              void view.current?.display(cfi).catch((e) => setError(String(e)));
+              jump(cfi);
             }}
           />
         </details>

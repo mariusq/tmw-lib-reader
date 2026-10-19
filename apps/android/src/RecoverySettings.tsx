@@ -6,7 +6,7 @@ export function recoveryReaderSettings(storage: Storage) {
   for (let i = 0; i < storage.length; i++) {
     const key = storage.key(i);
     if (key && (key.startsWith("tmw-local-cfi-") ||
-      ["tmw-reader-font-size", "tmw-reader-theme", "tmw-reader-writing-mode", "tmw-reader-hide-furigana", "tmw-last-download", "tmw-screen"].includes(key))) {
+      ["tmw-reader-font-size", "tmw-reader-theme", "tmw-reader-writing-mode", "tmw-reader-hide-furigana", "tmw-last-download", "tmw-screen", "tmw-consolidate-series", "tmw-series-confidence", "tmw-series-group-copies", "tmw-home-metric", "tmw-show-covers"].includes(key))) {
       result[key] = storage.getItem(key) ?? "";
     }
   }
@@ -30,7 +30,7 @@ export default function RecoverySettings() {
   return <section className="rounded-xl border border-slate-700 p-4 space-y-3">
     <h2 className="font-semibold">Backup and recovery</h2>
     <p>Save a recovery ZIP containing progress, bookmarks, notes, lookup history,
-      pending and rejected sync changes, catalog identities and reader settings.
+      reading activity, reset generations, pending and rejected sync changes, catalog identities and reader settings.
       It works offline and includes phone-only records.</p>
     <p>Book files, the dictionary, covers and pairing credentials are excluded.
       Keep manually imported EPUB copies separately. The ZIP contains private notes

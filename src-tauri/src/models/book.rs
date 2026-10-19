@@ -58,6 +58,9 @@ pub struct Book {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserBook {
+    pub series_key: Option<String>,
+    pub series_title: Option<String>,
+    pub series_count: i64,
     pub id: i64,
     pub library_root_id: i64,
     pub file_name: String,
@@ -90,6 +93,7 @@ pub struct BookDetails {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReaderBook {
+    pub content_key: String,
     pub id: i64,
     pub file_path: String,
     pub title: String,

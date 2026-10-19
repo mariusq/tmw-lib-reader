@@ -6,7 +6,9 @@ declare module "epubjs" {
     prev: () => Promise<void>;
     currentLocation: () => import("../features/reader/readerNavigation").PageLocation | undefined;
     destroy: () => void;
+    off?: (event: string, listener: (...args: unknown[]) => void) => void;
     on: (event: string, listener: (...args: unknown[]) => void) => void;
+    getRange?: (cfi: string) => Range | undefined;
     getContents: () => Array<{ document: Document; cfiFromRange: (range: Range) => string }>;
     themes: {
       default: (rules: Record<string, Record<string, string>>) => void;

@@ -24,6 +24,7 @@ export type UserState = {
   next: number | null;
 };
 export type SyncStatus = {
+  activity?: { busy: boolean; message: string; pending: number; rejected: number };
   busy: boolean;
   pending: number;
   message: string;

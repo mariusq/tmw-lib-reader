@@ -404,6 +404,15 @@ fn handle(
         return reply(s, 200, json!({"protocolVersion":1,"revoked":true}))
             .map_err(|_| (500, "response_failed"));
     }
+    if r.path == "/v1/activity-sync" && r.method == "POST" {
+        let q=serde_json::from_slice(&r.body).map_err(|_|(400,"invalid_activity"))?;
+        let db=Database::open_api_writer(catalog).map_err(|_|(503,"catalog_busy"))?;
+        let result=db.activity_sync(q).map_err(|e| match e {
+            rusqlite::Error::InvalidQuery => (400,"invalid_activity"),
+            _ => (503,"activity_storage_unavailable"),
+        })?;
+        return reply(s,200,result).map_err(|_|(500,"response_failed"));
+    }
     if r.path == "/v3/user-sync" && r.method == "POST" {
         let q:crate::db::user_sync::SyncRequest=serde_json::from_slice(&r.body).map_err(|_|(400,"invalid_sync"))?;
         if q.operations.len()>16 {return Err((400,"sync_bounds"))}
@@ -763,6 +772,21 @@ mod tests {
             archive.write_all(data.as_bytes()).unwrap();
         }
         archive.finish().unwrap();
+    }
+    #[test]
+    fn activity_endpoint_authorizes_and_deduplicates_generated_metadata() {
+        let temp=tempfile::tempdir().unwrap();let catalog=temp.path().join("catalog.sqlite3");
+        let db=Database::open(&catalog).unwrap();
+        let root=db.add_library_root(NewLibraryRoot{path:"generated-missing",display_name:"fixture"}).unwrap();
+        let book=db.add_book(NewBook{library_root_id:root.id,file_path:"generated-missing/fixture.epub",parent_folder_path:"generated-missing",file_name:"fixture.epub",file_size:1,modified_time:1}).unwrap();
+        let public=db.public_id(book.id).unwrap();let ns=db.setting("companion_catalog_id").unwrap().unwrap();
+        let service=Service::default();service.enable(catalog,temp.path().join("auth.sqlite3")).unwrap();
+        let code=service.pairing_code().unwrap();let (_,paired)=json_response("POST","/v1/pair","",json!({"code":code,"name":"fixture"}));let token=paired["token"].as_str().unwrap();
+        let request=json!({"catalogId":ns,"operations":[{"id":"http-activity","kind":"time","bookId":public,"day":"2026-10-14","startMs":10000,"endMs":20000,"milliseconds":10000}]});
+        assert_eq!(json_response("POST","/v1/activity-sync","",request.clone()).0,401);
+        let (status,first)=json_response("POST","/v1/activity-sync",token,request.clone());assert_eq!(status,200,"{first}");assert_eq!(first["acknowledged"],json!(["http-activity"]));
+        let (status,retry)=json_response("POST","/v1/activity-sync",token,request);assert_eq!(status,200);assert_eq!(retry["events"],first["events"]);
+        service.disable();
     }
     #[test]
     fn private_api_pairing_isolation_import_and_versions() {

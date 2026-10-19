@@ -35,6 +35,39 @@ mod protocol_tests {
         }
     }
     #[test]
+    fn api_reader_catalog_refresh_initializes_connection_local_series() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.sqlite3");
+        let db = Database::open(&path).unwrap();
+        let root = db.add_library_root(crate::models::library_root::NewLibraryRoot {
+            path: "generated-only", display_name: "fixture",
+        }).unwrap();
+        let candidates: Value = serde_json::from_str(include_str!("series_candidates.json")).unwrap();
+        let candidate = &candidates[0];
+        let book = db.upsert_scanned_book(crate::models::book::NewBook {
+            library_root_id: root.id,
+            file_path: candidate["path"].as_str().unwrap(),
+            parent_folder_path: "generated-only", file_name: "fixture.epub",
+            file_size: 123, modified_time: 1,
+        }).unwrap();
+        db.save_extracted_metadata(book.book_id, &crate::models::book::ExtractedBookMetadata {
+            title: Some(candidate["title"].as_str().unwrap().into()),
+            creator: Some(candidate["author"].as_str().unwrap().into()),
+            ..Default::default()
+        }).unwrap();
+        // Paths are metadata only: this fixture never opens a source EPUB.
+        let reader = Database::open_api_reader(&path).unwrap();
+        for _ in 0..2 {
+            let page = reader.catalog_page(cursor(None, None, 0, "".into(), false)).unwrap();
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            assert_eq!(page["items"][0]["seriesMembership"]["key"],
+                format!("proposal:{}", candidate["group_key"].as_str().unwrap()));
+        }
+        let delta = reader.catalog_page(cursor(None, None, 0, "".into(), true)).unwrap();
+        assert_eq!(delta["items"].as_array().unwrap().len(), 1);
+        assert!(reader.connection.lock().unwrap().execute("DELETE FROM books", []).is_err());
+    }
+    #[test]
     fn revisions_pages_tombstones_and_rollback_are_consistent() {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(&temp.path().join("catalog.sqlite3")).unwrap();
@@ -153,6 +186,16 @@ impl Database {
             return Err("restart_snapshot");
         }
         let mut c = self.connection.lock().unwrap();
+        // API readers have their own connection, so they cannot see the UI's
+        // temporary proposal index. Initialize only for catalog requests; the
+        // persistent catalog remains read-only on these connections.
+        let has_series_index: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='series_candidates')",
+            [], |row| row.get(0),
+        ).map_err(|_| "catalog_busy")?;
+        if !has_series_index {
+            super::series::initialize(&mut c).map_err(|_| "catalog_busy")?;
+        }
         let tx = c.transaction().map_err(|_| "catalog_busy")?;
         let (rev, floor, epoch): (i64, i64, String) = tx
             .query_row(
@@ -203,7 +246,7 @@ impl Database {
                  COALESCE(NULLIF(o.volume_label,''),b.discovered_series_index,'') AS volume,
                  b.discovered_language AS language,b.discovered_identifier AS identifier,
                  b.file_name AS fileName,b.file_size AS bytes,b.modified_time AS modified,
-                 b.created_at AS dateAdded,b.reading_status AS readingStatus,
+                 b.created_at AS dateAdded,b.reading_status AS readingStatus,b.completed_at AS completedAt,
                  b.extraction_status AS extractionStatus,o.notes AS notes,
                  d.title_reading AS titleReading,d.creator_reading AS creatorReading,d.series_reading AS seriesReading,d.aliases_normalized AS aliases,
                  ro.reading AS readingOverride,ro.aliases AS aliasesOverride,
@@ -237,6 +280,10 @@ impl Database {
                     })
                     .map_err(|_| "catalog_busy")?;
                 value["id"] = json!(public);
+                value["seriesMembership"] = super::series::portable_membership(&tx, id,
+                    value["title"].as_str().unwrap_or(""),value["creator"].as_str().unwrap_or(""),
+                    value["series"].as_str().unwrap_or(""),value["volume"].as_str().unwrap_or(""))
+                    .map_err(|_| "catalog_busy")?;
                 value["contentVersion"] = Value::Null;
                 value["contentVersionEndpoint"] = json!(format!("/v1/books/{public}/content"));
                 value["available"] = json!(value["extractionStatus"] != "unavailable");
@@ -270,7 +317,7 @@ impl Database {
         } else {
             None
         };
-        let response = json!({"protocolVersion":2,"catalogId":namespace,"epoch":epoch,"revision":rev,"expires":q.expires.unwrap_or(now+900),"items":items,"next":next});
+        let response = json!({"protocolVersion":2,"seriesRevision":super::series::revision(),"catalogId":namespace,"epoch":epoch,"revision":rev,"expires":q.expires.unwrap_or(now+900),"items":items,"next":next});
         if response.to_string().len() > 1_000_000 {
             return Err("metadata_bounds");
         }

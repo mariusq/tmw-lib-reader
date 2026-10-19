@@ -42,6 +42,38 @@ class MobileStorageTest {
             for((name,data) in listOf("mimetype" to "application/epub+zip".toByteArray(),"META-INF/container.xml" to "<container><rootfiles><rootfile full-path='OEBPS/book.opf'/></rootfiles></container>".toByteArray(),"OEBPS/book.opf" to "<package><manifest><item id='cover' href='cover.png' properties='cover-image'/><item id='chapter' href='chapter.xhtml'/></manifest><spine><itemref idref='chapter'/></spine></package>".toByteArray(),"OEBPS/chapter.xhtml" to "<html xmlns='http://www.w3.org/1999/xhtml'><body>猫</body></html>".toByteArray(),"OEBPS/cover.png" to image.toByteArray())) {z.putNextEntry(ZipEntry(name));z.write(data);z.closeEntry()}
         };return out.toByteArray()
     }
+    @Test fun emptyDeltaPreservesCatalogAndMissingGenerationRecoversFromSnapshot() {
+        val context=InstrumentationRegistry.getInstrumentation().targetContext
+        val root=File(context.cacheDir,"catalog-recovery-${System.nanoTime()}").apply {mkdirs()}
+        val requestedDeltas=mutableListOf<Boolean>()
+        val store=MobileStorage(activity(),root) {path,body,_ ->
+            assertEquals("/v2/catalog",path)
+            val delta=body!!.getBoolean("delta");requestedDeltas.add(delta)
+            val items=JSONArray()
+            if(!delta)for(n in 1..3)items.put(JSONObject().put("id",id(n)).put("title","Book $n").put("available",true))
+            Response(JSONObject().put("protocolVersion",2).put("catalogId",ns).put("epoch","fixture-epoch")
+                .put("revision",1).put("seriesRevision","fixture-series").put("items",items).put("next",JSONObject.NULL).toString().toByteArray())
+        }
+        try {
+            call(store,"sync")
+            val generation=call(store,"setting","generation-$ns")
+            call(store,"sync")
+            assertEquals(listOf(false,true),requestedDeltas)
+            assertEquals(generation,call(store,"setting","generation-$ns"))
+            assertEquals(3,(call(store,"browse",JSONObject()) as JSONObject).getJSONArray("items").length())
+            // Simulate an empty published generation with a still-current cursor.
+            // Repair must leave independent copy/user records intact.
+            db(store).execSQL("INSERT INTO downloads VALUES(?,?,?,?,?)",arrayOf<Any>(ns,id(1),"fixture-version","fixture.epub",10))
+            db(store).execSQL("CREATE TABLE recovery_user_fixture(note TEXT)")
+            db(store).execSQL("INSERT INTO recovery_user_fixture VALUES('Keep this note')")
+            call(store,"set","generation-$ns","missing-generation")
+            call(store,"sync")
+            assertFalse(requestedDeltas.last())
+            assertEquals(3,(call(store,"browse",JSONObject()) as JSONObject).getJSONArray("items").length())
+            assertEquals(1L,db(store).compileStatement("SELECT count(*) FROM downloads").simpleQueryForLong())
+            assertEquals(1L,db(store).compileStatement("SELECT count(*) FROM recovery_user_fixture").simpleQueryForLong())
+        } finally {close(store);require(root.canonicalPath.startsWith(context.cacheDir.canonicalPath+File.separator));root.deleteRecursively()}
+    }
     @Test fun restartableTenThousandCatalogDownloadsAndCompleteCachePolicy() {
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val root=File(context.cacheDir,"phase4-fixture-${System.nanoTime()}").apply {mkdirs()}

@@ -19,6 +19,21 @@ internal class UserSyncStorage(private val db:SQLiteDatabase,
     @Volatile private var nextRetry=0L
     @Volatile private var lastSuccess=0L
     private var failures=0
+    companion object {
+        // Shared by successful local display and canonical progress pulls. No EPUB access.
+        fun rememberRead(db:SQLiteDatabase,ns:String,book:String) {
+            db.beginTransaction()
+            try {
+                db.execSQL("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL)")
+                val key="recent-books-"+ns
+                val previous=db.rawQuery("SELECT v FROM settings WHERE k=?",arrayOf(key)).use {if(it.moveToFirst())JSONArray(it.getString(0)) else JSONArray()}
+                val recent=JSONArray().put(book)
+                for(i in 0 until previous.length()) {val old=previous.getString(i);if(old!=book && recent.length()<12)recent.put(old)}
+                db.execSQL("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)",arrayOf(key,recent.toString()))
+                db.setTransactionSuccessful()
+            } finally {db.endTransaction()}
+        }
+    }
     init {
         db.execSQL("CREATE TABLE IF NOT EXISTS user_records(ns TEXT,book TEXT,kind TEXT,entity TEXT,version TEXT,json TEXT NOT NULL,PRIMARY KEY(ns,book,kind,entity,version))")
         db.execSQL("CREATE TABLE IF NOT EXISTS user_queue(n INTEGER PRIMARY KEY AUTOINCREMENT,ns TEXT NOT NULL,operation TEXT NOT NULL)")
@@ -88,6 +103,7 @@ internal class UserSyncStorage(private val db:SQLiteDatabase,
             val sequence=db.rawQuery("SELECT counter FROM user_device WHERE k=1",null).use {it.moveToFirst();it.getLong(0)}
             operation.put("sequence",sequence)
             db.execSQL("INSERT INTO user_queue(ns,operation) VALUES(?,?)",arrayOf(ns,operation.toString()))
+            if(kind=="progress" && fields.optString("locationCfi").isNotEmpty())rememberRead(db,ns,book)
         }
         nextRetry=0
         JSONObject().put("entityId",entity).put("operationId",operation.getString("id"))
@@ -98,14 +114,32 @@ internal class UserSyncStorage(private val db:SQLiteDatabase,
         JSONObject().put("busy",busy.get()).put("pending",count).put("message",message).put("lastSuccess",lastSuccess).put("nextRetry",nextRetry).put("rejected",rejected)
     }
     fun start():JSONObject {
-        if(busy.compareAndSet(false,true))worker.execute {try {sync();failures=0;nextRetry=0;lastSuccess=System.currentTimeMillis();message="Synced"}
+        if(busy.compareAndSet(false,true))worker.execute {try {require(sync()) {"More changes pending; continuing automatically"};failures=0;nextRetry=0;lastSuccess=System.currentTimeMillis();message="Synced"}
             catch(e:Exception) {failures=minOf(failures+1,6);nextRetry=System.currentTimeMillis()+minOf(300000L,5000L*(1L shl failures));message=e.message?:"User sync unavailable"}
             finally {busy.set(false)}}
         return status()
     }
+    /** Serialize with automatic delivery, then read the committed canonical position.
+     * A slow/offline PC must not prevent opening a downloaded book indefinitely. */
+    fun prepareOpen(args:JSONObject):JSONObject {
+        val ns=valid(args.getString("ns"))
+        require(ns==namespace()) {"This download belongs to another PC catalog; using saved position"}
+        val task=worker.submit<JSONObject> {
+            require(ns==namespace()) {"PC catalog changed while checking reading position"}
+            require(sync()) {"More changes pending; using saved position until sync completes"}
+            state(args)
+        }
+        try {return task.get(8,TimeUnit.SECONDS)}
+        catch(e:java.util.concurrent.TimeoutException) {
+            // Do not interrupt a transaction or discard an in-flight acknowledgment.
+            throw IllegalStateException("PC position check timed out; using saved position",e)
+        } catch(e:java.util.concurrent.ExecutionException) {
+            throw IllegalStateException(e.cause?.message?:"PC position unavailable; using saved position",e)
+        }
+    }
     /** Bounded run; a durable cursor commits with each acknowledged batch/page. */
-    fun sync() {
-        val ns=namespace()?:return
+    fun sync():Boolean {
+        val ns=namespace()?:return false
         message="Syncing progress, notes and lookup history"
         repeat(100) {
             val body=synchronized(lock) {
@@ -148,16 +182,20 @@ internal class UserSyncStorage(private val db:SQLiteDatabase,
                     val entity=if(kind!="progress")valid(row.getString("entityId")) else "";val ver=if(row.isNull("contentVersion"))"" else version(row.getString("contentVersion"))
                     db.execSQL("INSERT OR REPLACE INTO user_records VALUES(?,?,?,?,?,?)",arrayOf(ns,book,kind,entity,ver,row.toString()))
                     if(kind=="history")historyApply(ns,row,true)
+                    if(kind=="progress" && !row.optBoolean("deleted") && row.optJSONObject("fields")?.optString("locationCfi").orEmpty().isNotEmpty())rememberRead(db,ns,book)
                 }
+                // An older pull must not push newer, still-offline local reading out of the list.
+                db.rawQuery("SELECT book FROM (SELECT json_extract(operation,'$.bookId') AS book,max(n) AS recent FROM user_queue WHERE ns=? AND json_extract(operation,'$.kind')='progress' AND json_extract(operation,'$.fields.locationCfi')<>'' GROUP BY book ORDER BY recent DESC LIMIT 12) ORDER BY recent",arrayOf(ns)).use {while(it.moveToNext())rememberRead(db,ns,it.getString(0))}
                 val cursor=response.getLong("cursor");require(cursor>=body.getLong("cursor"));db.execSQL("UPDATE user_sync SET cursor=? WHERE ns=?",arrayOf<Any>(cursor,ns))
                 db.execSQL("DELETE FROM user_provisional WHERE ns=? AND until_cursor<=?",arrayOf<Any>(ns,cursor))
                 if(response.has("epoch"))db.execSQL("INSERT OR REPLACE INTO user_epoch VALUES(?,?)",arrayOf(ns,response.getString("epoch")))
                 if(!response.getBoolean("hasMore") && count(ns)==0 && db.rawQuery("SELECT 1 FROM user_provisional WHERE ns=? LIMIT 1",arrayOf(ns)).use {!it.moveToFirst()})historyRetain(ns)
             }}
-            if(!response.getBoolean("hasMore") && synchronized(lock) {count(ns)==0})return
+            if(!response.getBoolean("hasMore") && synchronized(lock) {count(ns)==0})return true
             require(response.getJSONArray("acknowledged").length()>0 || response.getJSONArray("rejected").length()>0 || response.getLong("cursor")>body.getLong("cursor")) {"Sync made no progress"}
         }
         message="More changes pending; continuing automatically"
+        return false
     }
     private val localHistoryNamespace="local-proof"
     private fun historyInitialize() {

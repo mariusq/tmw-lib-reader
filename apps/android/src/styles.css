@@ -9,9 +9,12 @@
   --color-slate-400: #a8a29e;
   --color-slate-300: #d6d3d1;
   --color-teal-300: #fbbf24;
-  --font-sans: "Noto Sans CJK JP", "Yu Gothic", system-ui, sans-serif;
+  --font-sans: "Noto Sans CJK JP", "Noto Sans JP", sans-serif;
 }
 :root {
+  /* Select Japanese Han glyphs in Android WebView without changing the
+     English UI language used by accessibility tools. */
+  -webkit-locale: "ja";
   font-family: var(--font-sans);
   color: #e7e5e4;
   background: #0c0a09;
@@ -196,12 +199,23 @@ p.text-sm {
 }
 .book-card {
   display: flex;
+  flex-wrap: wrap;
   gap: 14px;
   padding: 16px;
   background: #1c1917;
   border: 1px solid #292524;
   border-radius: 18px;
 }
+
+.series-card-button { position: relative; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 112px; padding-top: 24px; text-align: left; }
+.series-card { border-color: #a16207; }
+.series-badge { position: absolute; top: 0; left: 0; padding: 2px 8px; border-radius: 6px; background: #fbbf24; color: #1c1917; font-size: 12px; font-weight: 700; }
+.series-copy-picker { flex-basis: 100%; min-width: 0; border-top: 1px solid #44403c; padding-top: 8px; }
+.series-copy-picker summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: #fde68a; }
+.series-copy-picker .book-card { margin-top: 12px; }
+.series-heading { border: 1px solid #a16207; border-radius: 16px; padding: 14px; }
+.series-heading nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.series-heading h3 { margin-top: 12px; font-size: 18px; line-height: 1.5; }
 .book-card h3 {
   font-size: 16px;
   line-height: 1.5;
@@ -450,3 +464,63 @@ summary {
   padding: 12px;
   border-radius: 12px;
 }
+.reader-sync {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  padding: 12px;
+  border: 1px solid currentColor;
+  border-radius: 12px;
+  font-size: 14px;
+}
+.reader-sync p { margin: 0 0 8px; }
+.reader-sync .control { background: inherit; color: inherit; min-height: 48px; }
+
+.mobile-home {display:grid;gap:12px;min-width:0}
+.mobile-home>h2 {font-size:1.35rem}
+.mobile-home-panel {padding:12px;border:1px solid #ffffff18;border-radius:14px;min-width:0;background:#ffffff04}
+.mobile-home-panel h2 {font-size:1rem;font-weight:600;margin:0}
+.mobile-home-heading {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.mobile-home-heading select {min-height:44px;max-width:150px;background:#1c1917;border-radius:8px;padding:6px;font-size:.75rem}
+.mobile-home-book {display:flex;gap:10px;padding-top:10px;align-items:center}
+.mobile-home-book .book-cover {width:48px;height:72px;flex:none}
+.mobile-home-book>div:last-child {min-width:0;flex:1}
+.mobile-home-book h3 {display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:.9rem;line-height:1.3}
+.mobile-home-book p {font-size:.75rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a8adb7}
+.mobile-home .control {min-height:44px;padding:6px 10px;font-size:.8rem}
+.home-resume {width:100%;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mobile-activity-panel {background:#171412;border-color:#44403c}
+.mobile-week-heading {margin-top:14px;color:#a8a29e;font-size:.7rem}
+.mobile-calendar-nav {display:flex;align-items:center;gap:4px;border-top:1px solid #ffffff0d;padding-top:6px;margin-top:12px}
+.mobile-calendar-nav>span {flex:1;min-width:0;font-size:.8rem;color:#d6d3d1}
+.mobile-calendar-nav .control {background:transparent;border-color:transparent}
+.mobile-calendar-nav .control:first-child,.mobile-calendar-nav .control:last-child {min-width:44px;font-size:1.4rem;padding:0}
+.mobile-calendar-scroll {overflow-x:auto;max-width:100%;padding:3px 0 8px;overscroll-behavior-x:contain}
+.mobile-heatmap {display:grid;grid-template-columns:repeat(7,minmax(44px,1fr));gap:3px;min-width:326px}
+.mobile-calendar-day {display:grid;gap:5px;text-align:center}
+.mobile-calendar-day>span {font-size:.65rem;color:#a8a29e}
+.activity-cell {width:100%;height:44px;border-radius:9px;border:1px solid #ffffff08;font-size:.8rem;color:#e7e5e4;position:relative}
+.activity-cell:not(:disabled)::after {content:"";position:absolute;bottom:5px;left:calc(50% - 2px);width:4px;height:4px;border-radius:50%;background:#fbbf24}
+.activity-level-0:not(:disabled)::after {background:#57534e}
+.activity-cell[aria-pressed=true] {background:#fbbf24;color:#1c1917;border-color:#fbbf24;font-weight:700}
+.activity-cell[aria-pressed=true]::after {background:#1c1917}
+.activity-cell:disabled {opacity:.25}
+.activity-level-0 {background:#211e1b}.activity-level-1 {background:#30271b}.activity-level-2 {background:#46351b}.activity-level-3 {background:#64481c}.activity-level-4 {background:#855d1d}
+.mobile-day-detail {padding:8px 0 10px;font-size:.75rem}.mobile-day-detail h3 {font-size:.8rem;font-weight:600;margin:0 0 3px}.mobile-day-detail p {margin:0;color:#a8a29e}
+.home-day-book {display:grid;gap:2px;margin-top:8px}.home-day-book small {color:#a8adb7}
+.mobile-week-stats {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:4px 0 10px}
+.mobile-week-stats>div {display:grid;gap:2px}.mobile-week-stats strong {font-size:1.2rem;color:#fafaf9;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}.mobile-week-stats span {font-size:.65rem;color:#a8a29e}
+.mobile-activity-facts {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 8px;font-size:.7rem;color:#a8a29e}.mobile-activity-facts b {font-weight:500;color:#e7e5e4}
+.mobile-activity-details>summary {display:flex;align-items:center;gap:8px;min-height:44px;font-size:.75rem;color:#a8a29e;list-style:none}
+.mobile-activity-details>summary::-webkit-details-marker {display:none}
+.mobile-activity-details>summary::after {content:"+";margin-left:auto;font-size:1rem}
+.mobile-activity-details[open]>summary::after {content:"−"}
+.mobile-tracking-controls {border-top:1px solid #ffffff0d}
+.mobile-tracking-actions {display:flex;flex-wrap:wrap;gap:6px;padding-bottom:4px}
+.mobile-activity-sync {display:block;font-size:.7rem;color:#a8a29e;margin-bottom:8px}
+.mobile-activity-notice {font-size:.75rem;color:#fbbf24;margin:0 0 8px}
+.mobile-home .mobile-clear-activity {color:#fca5a5}
+.home-clear-confirm {border:1px solid #ffffff28;padding:10px;border-radius:8px;margin-top:8px;font-size:.8rem}
+.bottom-nav {grid-template-columns:repeat(5,minmax(0,1fr))}

@@ -420,9 +420,10 @@ fn import_catalog_backup(
 fn browse_books(
     database: State<'_, db::Database>,
     request: BrowseBooksRequest,
+    series_options: Option<db::series::SeriesBrowseOptions>,
 ) -> Result<Vec<BrowserBook>, String> {
     database
-        .browse_books(&request)
+        .browse_series_books(&request, series_options.as_ref())
         .map_err(|error| error.to_string())
 }
 
@@ -495,6 +496,27 @@ fn get_reader_book(
     database
         .reader_book(book_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_reading_activity_generation(database: State<'_, db::Database>) -> Result<String,String> {
+    database.activity_generation().map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn record_reading_characters(database: State<'_, db::Database>, request: db::activity::CharacterCheckpoint) -> Result<i64, String> {
+ database.record_characters(request).map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn record_reading_activity(database: State<'_, db::Database>, request: db::activity::ActivityCheckpoint) -> Result<(), String> {
+ database.record_activity(request).map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn get_reading_activity(database: State<'_, db::Database>, start_day: String, end_day: String, selected_day: String, week_start: i64) -> Result<db::activity::ActivitySummary, String> {
+ database.reading_activity(&start_day,&end_day,&selected_day,week_start).map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn clear_reading_activity(database: State<'_, db::Database>) -> Result<(), String> {
+ database.clear_reading_activity().map_err(|e|e.to_string())
 }
 
 #[tauri::command]
@@ -591,6 +613,19 @@ fn save_reading_location(
     database
         .save_reading_location(book_id, &location_cfi)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_reader_position(database: State<'_, db::Database>, book_id: i64) -> Result<db::reader_position::ReaderPosition, String> {
+    database.reader_position(book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_reader_position(database: State<'_, db::Database>, book_id: i64, location_cfi: String, expected_token: String) -> Result<db::reader_position::ReaderPosition, String> {
+    if location_cfi.len()>4096 || !location_cfi.starts_with("epubcfi(") || expected_token.len()>16384 {
+        return Err("Reading location is invalid.".into());
+    }
+    database.save_reader_position(book_id,&location_cfi,&expected_token).map_err(|e|e.to_string())
 }
 
 #[tauri::command]
@@ -883,6 +918,11 @@ pub fn run() {
             edit_passage,
             delete_passage,
             get_passage_location,
+            record_reading_characters,
+            record_reading_activity,
+            get_reading_activity,
+            get_reading_activity_generation,
+            clear_reading_activity,
             list_resume_books,
             remove_resume_book,
             record_reader_open,
@@ -893,6 +933,8 @@ pub fn run() {
             save_smart_shelf,
             delete_smart_shelf,
             get_reading_location,
+            get_reader_position,
+            save_reader_position,
             save_reading_location,
             tokenize_dictionary_target,
             lookup_reader_text,

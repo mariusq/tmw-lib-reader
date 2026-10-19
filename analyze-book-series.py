@@ -111,6 +111,9 @@ for (author, base_key), members in groups.items():
     existing = {key(entry[0]['existing_series']) for entry in entries if entry[0]['existing_series']}
     if len(existing) > 1:
         caution.append('Existing catalog series labels disagree.')
+    # Copy identity is independent of series membership. Duplicate volumes
+    # deserve a review note, but must not exclude a strong series at High.
+    confidence = 'medium' if caution else 'high'
     counts = collections.Counter(entry[2] for entry in entries if entry[2] is not None)
     if any(count > 1 for count in counts.values()):
         caution.append('Several records share a volume marker; copies/editions are retained separately.')
@@ -118,7 +121,7 @@ for (author, base_key), members in groups.items():
     output.append({
         'proposed_series': bases.most_common(1)[0][0],
         'authors': sorted({entry[0]['author'] for entry in entries}),
-        'confidence': 'medium' if caution else 'high',
+        'confidence': confidence,
         'reason': 'Same normalized author and title prefix with distinct volume markers or an exact unnumbered base title.',
         'review_notes': caution,
         'books': [book(entry) for entry in sorted(entries, key=sort_volume)],
@@ -153,6 +156,37 @@ for group_key, members in possible.items():
     })
     assigned.update(members)
 
+# Attach unnumbered side stories/bonus editions only to a substantial,
+# unambiguous existing title prefix with the same author. Membership confidence
+# is separate from the numbered core series' confidence.
+anchors = collections.defaultdict(list)
+for group in output:
+    if group['confidence'] == 'possible':
+        continue
+    base_key = key(group['proposed_series'])
+    if len(base_key) >= 8:
+        for author in group['authors']:
+            anchors[key(author)].append((base_key, group))
+related_count = 0
+for row in prepared:
+    if row['id'] in assigned or not row['author_key']:
+        continue
+    title_key = key(row['cleaned'])
+    matches = [(base, group) for base, group in anchors[row['author_key']] if title_key.startswith(base)]
+    if not matches:
+        continue
+    longest = max(len(base) for base, group in matches)
+    matches = [(base, group) for base, group in matches if len(base) == longest]
+    if len(matches) != 1:
+        continue
+    base, group = matches[0]
+    member = book((row, group['proposed_series'], None, 'related_title_prefix', ''))
+    member['membership_confidence'] = 'medium'
+    member['membership_note'] = 'Same author and distinctive complete series-title prefix; may be a bonus, side story or edition. Volume is unspecified.'
+    group['books'].append(member)
+    assigned.add(row['id'])
+    related_count += 1
+
 output.sort(key=lambda group: ({'high': 0, 'medium': 1, 'possible': 2}[group['confidence']], group['proposed_series']))
 for index, group in enumerate(output, 1):
     group['proposal_id'] = f'series-{index:04d}'
@@ -164,7 +198,7 @@ result = {
     'purpose': 'Review-only inferred series proposals; no catalog assignments applied.',
     'method': 'Unicode NFKC/HTML normalization; title patterns blocked by matching complete normalized author fields. Filenames and folders are not used.',
     'limitations': ['Confidence labels are heuristic, not probabilities.', 'Unmarked or differently titled sequels and differing author credits can be missed.', 'No web research or EPUB content analysis performed.', 'Book IDs are specific to this catalog; duplicate copies are not removed.', 'Missing-author books are excluded; unmatched books are not asserted to be standalone.'],
-    'summary': {'catalog_books': len(rows), 'proposed_groups': len(output), 'books_in_proposals': len(assigned), 'books_without_proposal': len(rows)-len(assigned), 'groups_by_confidence': confidence_counts},
+    'summary': {'catalog_books': len(rows), 'proposed_groups': len(output), 'books_in_proposals': len(assigned), 'books_without_proposal': len(rows)-len(assigned), 'groups_by_confidence': confidence_counts, 'medium_related_members': related_count},
     'series': output,
 }
 Path('book-series-proposals.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

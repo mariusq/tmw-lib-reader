@@ -1,8 +1,13 @@
+pub mod activity;
+pub(crate) mod activity_sync;
+#[cfg(test)] mod activity_sync_tests;
 pub(crate) mod companion;
 pub(crate) mod user_sync;
 pub mod history;
 mod passages;
+pub mod reader_position;
 mod duplicates;
+pub mod series;
 pub mod shelves;
 
 use std::{
@@ -64,6 +69,7 @@ impl Database {
         let mut connection = Connection::open(path)?;
         configure_connection(&connection)?;
         duplicates::initialize(&mut connection)?;
+        series::initialize(&mut connection)?;
         let search_schema_changed = run_migrations(&mut connection)?;
         if search_schema_changed || !search_index_is_complete(&connection)? {
             rebuild_search_index(&mut connection, None, |_| {})?;
@@ -239,6 +245,8 @@ impl Database {
             "UPDATE companion_revision SET epoch=lower(hex(randomblob(16)))",
             [],
         )?;
+        // Restored activity is intentional; pre-restore phone cursors and queues are stale.
+        connection.execute("UPDATE activity_sync_state SET epoch=lower(hex(randomblob(16))),cutoff_ms=?1",[unix_timestamp()*1000])?;
         Ok(())
     }
 
@@ -389,6 +397,7 @@ impl Database {
         )?;
         Ok(Some(ReaderBook {
             id: book.id,
+            content_key: activity::content_key(&connection, book.id)?,
             file_path: book.file_path,
             title,
         }))
@@ -716,10 +725,20 @@ impl Database {
     }
 
     pub fn browse_books(&self, request: &BrowseBooksRequest) -> rusqlite::Result<Vec<BrowserBook>> {
+        self.browse_series_books(request, None)
+    }
+
+    pub fn browse_series_books(&self, request: &BrowseBooksRequest, options: Option<&series::SeriesBrowseOptions>) -> rusqlite::Result<Vec<BrowserBook>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         shelves::validate_filter(request)?;
         let query = normalize_for_search(&request.query);
         let romaji_query = normalize_romaji(&request.query).replace(' ', "");
+        let series_confidence = match options.and_then(|value| value.confidence.as_deref()) {
+            None | Some("high") => 1,
+            Some("medium") => 2,
+            Some("all") => 3,
+            Some(_) => return Err(rusqlite::Error::InvalidParameterName("seriesConfidence".into())),
+        };
         let sort = match request.sort.as_str() {
             "author" => "effective_creator COLLATE NOCASE, effective_title COLLATE NOCASE",
             "series" => "effective_series COLLATE NOCASE, effective_volume COLLATE NOCASE, effective_title COLLATE NOCASE",
@@ -738,10 +757,15 @@ impl Database {
             .map(|value| format!("\"{}\"", value.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
+        let proposal_search = format!("SELECT sb.id FROM series_candidates sc JOIN books sb ON sb.file_path=sc.path LEFT JOIN book_overrides so ON so.book_id=sb.id
+            WHERE sc.confidence<={series_confidence} AND instr(lower(sc.normalized_name),lower(?5))>0
+            AND sc.title=COALESCE(NULLIF(so.title,''),NULLIF(sb.discovered_title,''),sb.file_name)
+            AND sc.author=COALESCE(NULLIF(so.creator,''),sb.discovered_creator,'')
+            AND COALESCE(NULLIF(so.series_name,''),sb.discovered_series,'')=''");
         let search_join = if use_fts {
-            "JOIN (SELECT book_id FROM book_search_fts WHERE book_search_fts MATCH ?10) matched ON matched.book_id=b.id"
+            format!("JOIN (SELECT book_id FROM book_search_fts WHERE book_search_fts MATCH ?10 UNION {proposal_search}) matched ON matched.book_id=b.id")
         } else {
-            ""
+            String::new()
         };
         let candidate_predicate = match request.duplicate_filtering.as_deref() {
             Some("off") => "",
@@ -766,6 +790,9 @@ impl Database {
         } else {
             "AND (?5='' OR instr(d.title_normalized, ?5)>0 OR instr(d.creator_normalized, ?5)>0 OR instr(d.series_normalized, ?5)>0 OR instr(d.file_name_normalized, ?5)>0 OR instr(d.parent_folder_normalized, ?5)>0 OR instr(d.tags_normalized, ?5)>0 OR instr(d.title_reading, ?5)>0 OR instr(d.creator_reading, ?5)>0 OR instr(d.series_reading, ?5)>0 OR instr(d.file_name_reading, ?5)>0 OR instr(d.aliases_normalized, ?5)>0 OR instr(replace(d.title_romaji, ' ', ''), ?6)>0 OR instr(replace(d.creator_romaji, ' ', ''), ?6)>0 OR instr(replace(d.series_romaji, ' ', ''), ?6)>0 OR instr(replace(d.file_name_romaji, ' ', ''), ?6)>0 OR instr(replace(d.aliases_romaji, ' ', ''), ?6)>0)"
         };
+        let search_predicate = if !use_fts && !query.is_empty() {
+            format!("AND ({} OR b.id IN ({proposal_search}))", search_predicate.trim_start_matches("AND "))
+        } else { search_predicate.to_owned() };
         let rank_order = if query.is_empty() {
             ""
         } else {
@@ -776,13 +803,13 @@ impl Database {
         } else {
             "?9 IS NULL"
         };
-        let sql = format!(
+        let mut sql = format!(
             "SELECT b.id, b.library_root_id, b.file_name, b.parent_folder_path, \
              COALESCE(NULLIF(o.title, ''), NULLIF(b.discovered_title, ''), CASE WHEN lower(b.file_name) LIKE '%.epub' THEN substr(b.file_name, 1, length(b.file_name)-5) ELSE b.file_name END) AS effective_title, \
              COALESCE(NULLIF(o.creator, ''), NULLIF(b.discovered_creator, ''), '') AS effective_creator, \
              COALESCE(NULLIF(o.series_name, ''), NULLIF(b.discovered_series, ''), '') AS effective_series, \
              COALESCE(NULLIF(o.volume_label, ''), NULLIF(b.discovered_series_index, ''), '') AS effective_volume, \
-             COALESCE(NULLIF(o.cover_path, ''), b.discovered_cover_path), b.created_at, b.modified_time, \
+             COALESCE(NULLIF(o.cover_path, ''), b.discovered_cover_path) AS effective_cover_path, b.created_at, b.modified_time, \
              (b.discovered_title IS NULL OR trim(b.discovered_title) = '' OR b.extraction_status = 'error') AS needs_metadata, b.extraction_status <> 'unavailable' AS is_available, b.reading_status='finished' AS is_finished \
              FROM books b JOIN library_roots r ON r.id=b.library_root_id \
              LEFT JOIN book_overrides o ON o.book_id=b.id \
@@ -797,6 +824,35 @@ impl Database {
              {search_predicate} \
              ORDER BY {rank_order}{sort} LIMIT ?7 OFFSET ?8"
         );
+        let grouped = options.is_some_and(|value| value.consolidate || value.selected_key.is_some());
+        if grouped {
+            let options = options.unwrap();
+            let confidence = series_confidence;
+            // Group the complete filtered result before LIMIT/OFFSET. Proposal
+            // membership requires unchanged effective title/author, not numeric IDs.
+            // Explicit user series labels take precedence over inferred proposals.
+            let base = sql.split(" ORDER BY ").next().unwrap();
+            let priority = if rank_order.is_empty() { "0" } else { rank_order.trim_end_matches(", ") };
+            let base = base.replacen("SELECT b.id,", &format!("SELECT {priority} AS sort_priority, b.file_path AS series_path, b.id,"), 1);
+            let group_sort = sort.replace("b.", "");
+            let collapse = if options.selected_key.is_some() { "1=1" } else { "member_rank=1" };
+            sql = format!("WITH raw AS ({base}), filtered AS (SELECT *, ROW_NUMBER() OVER (ORDER BY sort_priority, {group_sort}) AS sort_rank FROM raw), membership AS (
+                SELECT f.*, CASE WHEN effective_series<>'' THEN 'metadata:' || effective_series
+                    WHEN c.path IS NOT NULL THEN 'proposal:' || c.group_key ELSE 'book:' || f.id END AS series_key,
+                    CASE WHEN effective_series<>'' THEN effective_series ELSE c.name END AS series_title,
+                    COALESCE(c.confidence,0) AS membership_confidence,
+                    CASE WHEN effective_volume<>'' THEN CAST(effective_volume AS REAL) ELSE COALESCE(c.volume_order,0) END AS volume_sort
+                FROM filtered f LEFT JOIN series_candidates c ON c.path=f.series_path
+                    AND c.title=f.effective_title AND c.author=f.effective_creator AND c.confidence<={confidence}
+                ), ranked AS (SELECT *, COUNT(*) OVER (PARTITION BY series_key) AS series_count,
+                    ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY is_available DESC, membership_confidence, volume_sort, sort_rank) AS member_rank,
+                    MIN(sort_rank) OVER (PARTITION BY series_key) AS group_rank FROM membership)
+                SELECT id,library_root_id,file_name,parent_folder_path,effective_title,effective_creator,
+                    effective_series,effective_volume,effective_cover_path,
+                    created_at,modified_time,needs_metadata,is_available,is_finished,series_key,series_title,series_count
+                FROM ranked WHERE (?11 IS NULL OR series_key=?11) AND {collapse}
+                ORDER BY {} LIMIT ?7 OFFSET ?8", if options.selected_key.is_some() { "volume_sort, effective_volume COLLATE NOCASE, sort_rank" } else { "CASE WHEN series_count>1 THEN 0 ELSE 1 END, group_rank" });
+        }
         let mut statement = connection.prepare(&sql)?;
         let mut parameter_values = vec![
             request.library_root_id.map_or(Value::Null, Value::Integer),
@@ -812,8 +868,11 @@ impl Database {
                 .clone()
                 .map_or(Value::Null, Value::Text),
         ];
-        if use_fts {
+        if use_fts || grouped {
             parameter_values.push(Value::Text(fts_query));
+        }
+        if grouped {
+            parameter_values.push(options.and_then(|value| value.selected_key.clone()).map_or(Value::Null, Value::Text));
         }
         let books = statement
             .query_map(params_from_iter(parameter_values), |row| {
@@ -832,6 +891,9 @@ impl Database {
                     needs_metadata: row.get(11)?,
                     is_available: row.get(12)?,
                     is_finished: row.get(13)?,
+                    series_key: if grouped { row.get(14)? } else { None },
+                    series_title: if grouped { row.get(15)? } else { None },
+                    series_count: if grouped { row.get(16)? } else { 1 },
                 })
             })?
             .collect();
@@ -1098,6 +1160,38 @@ fn run_migrations(connection: &mut Connection) -> rusqlite::Result<bool> {
         transaction.execute_batch(include_str!("migrations/019_romaji_spacing.sql"))?;
         transaction.pragma_update(None, "user_version", 19)?;
         transaction.commit()?;
+    }
+    if version < 20 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("migrations/020_reading_activity.sql"))?;
+        transaction.pragma_update(None, "user_version", 20)?;
+        transaction.commit()?;
+    }
+    if version < 21 {
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('reading_activity') WHERE name='characters')",[],|r|r.get(0))?;
+        if !exists {transaction.execute_batch("ALTER TABLE reading_activity ADD COLUMN characters INTEGER NOT NULL DEFAULT 0 CHECK(characters>=0);")?;}
+        transaction.execute_batch(include_str!("migrations/021_activity_metrics.sql"))?;
+        transaction.pragma_update(None, "user_version", 21)?;
+        transaction.commit()?;
+    }
+    if version < 22 {
+        let tx = connection.transaction()?;
+        tx.execute_batch(include_str!("migrations/022_activity_sync.sql"))?;
+        tx.pragma_update(None, "user_version", 22)?;
+        tx.commit()?;
+    }
+    if version < 23 {
+        // Early schema-22 catalogs predate reset guards. Advance the schema
+        // explicitly rather than relying on edits to an already-applied migration.
+        let tx = connection.transaction()?;
+        let has_cutoff: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('activity_sync_state') WHERE name='cutoff_ms')", [], |r| r.get(0))?;
+        if !has_cutoff {
+            tx.execute_batch("ALTER TABLE activity_sync_state ADD COLUMN cutoff_ms INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        tx.execute_batch(include_str!("migrations/023_activity_reset_guards.sql"))?;
+        tx.pragma_update(None, "user_version", 23)?;
+        tx.commit()?;
     }
     Ok(version < 8)
 }
@@ -1546,7 +1640,7 @@ mod tests {
         let foreign_keys: i64 = connection
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 21);
         assert_eq!(foreign_keys, 1);
         assert!(connection
             .query_row(

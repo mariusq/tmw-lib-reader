@@ -44,6 +44,7 @@ internal class MobileStorage(activity: Activity,
     private val activeCovers=java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val cacheLock=Any()
     private val userData:UserSyncStorage
+    private val readingActivity:ReadingActivityStorage
     init {
         db.enableWriteAheadLogging()
         db.execSQL("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL)")
@@ -52,6 +53,7 @@ internal class MobileStorage(activity: Activity,
         db.execSQL("CREATE INDEX IF NOT EXISTS catalog_title ON catalog(ns,title,id)")
         db.execSQL("CREATE INDEX IF NOT EXISTS catalog_creator ON catalog(ns,creator,id)")
         db.execSQL("CREATE INDEX IF NOT EXISTS catalog_date ON catalog(ns,dateAdded,id)")
+        SeriesCatalog.ensureSchema(db)
         db.execSQL("CREATE TABLE IF NOT EXISTS stage(id TEXT PRIMARY KEY,json TEXT)")
         db.execSQL("CREATE TABLE IF NOT EXISTS downloads(ns TEXT,id TEXT,version TEXT,file TEXT,bytes INTEGER,PRIMARY KEY(ns,id))")
         db.execSQL("CREATE TABLE IF NOT EXISTS pending(ns TEXT,id TEXT,version TEXT,file TEXT,bytes INTEGER,previous TEXT,PRIMARY KEY(ns,id))")
@@ -84,6 +86,13 @@ internal class MobileStorage(activity: Activity,
                 JSONObject(String(bytes(c,1_000_000),Charsets.UTF_8))
             } finally {c.disconnect()}
         })
+        readingActivity=ReadingActivityStorage(db,{setting("namespace")},request={ body ->
+            val c=connect("/v1/activity-sync",body,null)
+            try {
+                if(c.responseCode==404 || c.responseCode==405)error("PC update needed for activity sync; local activity is kept")
+                JSONObject(String(bytes(c,1_000_000),Charsets.UTF_8))
+            } finally {c.disconnect()}
+        })
     }
     private fun setting(k:String):String?=db.rawQuery("SELECT v FROM settings WHERE k=?",arrayOf(k)).use { if(it.moveToFirst())it.getString(0) else null }
     fun export(output:java.io.OutputStream, webState:JSONObject) { RecoveryExport.write(db,output,webState) }
@@ -107,24 +116,47 @@ internal class MobileStorage(activity: Activity,
         var checkpoint=setting("checkpoint")?.let {JSONObject(it)}
         if(checkpoint!=null && System.currentTimeMillis()-checkpoint.optLong("started")>900000) checkpoint=null
         var attempts=0
+        // A cursor is useful only alongside its published local generation.
+        // Recover missing/empty metadata with a snapshot, rather than accepting
+        // an empty delta forever. Downloads and user state are separate tables.
+        val currentNamespace=setting("namespace")
+        val currentGeneration=currentNamespace?.let {setting("generation-$it")}
+        var forceFull=currentNamespace!=null && (setting("activity-metadata-$currentNamespace")!="1" || currentGeneration==null ||
+            db.rawQuery("SELECT count(*) FROM catalog WHERE ns=? AND gen=?",arrayOf(currentNamespace,currentGeneration)).use {it.moveToFirst();it.getLong(0)==0L})
+        if(forceFull) {checkpoint=null;db.execSQL("DELETE FROM settings WHERE k='checkpoint'")}
         while(true) {
             checkCancel()
             if(checkpoint==null) {
                 db.execSQL("DELETE FROM stage")
-                val previous=setting("cursor")?.let {JSONObject(it)}
+                val previous=if(forceFull)null else setting("cursor")?.let {JSONObject(it)}
                 checkpoint=JSONObject().put("epoch",previous?.optString("epoch")).put("since",previous?.optLong("revision")?:0)
                     .put("delta",previous!=null).put("after","").put("started",System.currentTimeMillis())
                 set("checkpoint",checkpoint.toString())
             }
             val cp=checkpoint
             if(cp.optBoolean("complete")) {finish(cp);return}
-            val req=JSONObject(cp.toString()).apply {remove("started");remove("catalogId");remove("complete")}
+            val req=JSONObject(cp.toString()).apply {remove("started");remove("catalogId");remove("complete");remove("seriesRevision")}
             val response=try {json("/v2/catalog",req)} catch(e:Exception) {
                 if(e.message=="restart_snapshot" && attempts++<3) {
                     db.execSQL("DELETE FROM settings WHERE k IN ('checkpoint','cursor')");checkpoint=null;continue
                 };throw e
             }
             requireProtocol(response,2)
+            val seriesRevision=response.optString("seriesRevision","")
+            require(seriesRevision.length<=128) {"Unsupported series revision"}
+            val previousSeries=setting("cursor")?.let {JSONObject(it).optString("seriesRevision","")}?:""
+            if(!cp.has("seriesRevision") && cp.optString("after").isNotEmpty() && seriesRevision.isNotEmpty()) {
+                db.execSQL("DELETE FROM settings WHERE k='checkpoint'");checkpoint=null;forceFull=true;continue
+            }
+            if(cp.optBoolean("delta") && previousSeries!=seriesRevision) {
+                // Keep the live pointer/cursor until a complete full snapshot publishes.
+                db.execSQL("DELETE FROM settings WHERE k='checkpoint'");checkpoint=null;forceFull=true;continue
+            }
+            if(cp.has("seriesRevision") && cp.optString("seriesRevision")!=seriesRevision) {
+                check(attempts++<3) {"Series metadata changed repeatedly; retry refresh"}
+                db.execSQL("DELETE FROM settings WHERE k='checkpoint'");checkpoint=null;forceFull=true;continue
+            }
+            cp.put("seriesRevision",seriesRevision)
             require(StatFs(root.path).availableBytes>response.toString().length*4L+32_000_000) {"Insufficient storage for catalog page"}
             val ns=valid(response.getString("catalogId"));val items=response.getJSONArray("items");require(items.length()<=50)
             if(cp.has("catalogId")) require(cp.getString("catalogId")==ns)
@@ -149,6 +181,16 @@ internal class MobileStorage(activity: Activity,
         val ns=cp.getString("catalogId")
         val gen=hash(cp.toString().toByteArray())
         val old=setting("generation-$ns")?:""
+        val staged=db.compileStatement("SELECT count(*) FROM stage").simpleQueryForLong()
+        if(cp.getBoolean("delta") && staged==0L && old.isNotEmpty()) {
+            // No metadata changed: retain the existing published generation.
+            transaction {
+                set("namespace",ns)
+                set("cursor",JSONObject().put("epoch",cp.getString("epoch")).put("revision",cp.getLong("revision")).put("seriesRevision",cp.optString("seriesRevision","")).toString())
+                db.execSQL("DELETE FROM settings WHERE k='checkpoint'")
+            }
+            return
+        }
         // Build an invisible generation in 250-record commits. Only the final
         // pointer switch is visible; cancellation/restart keeps the old catalog.
         var after=""
@@ -169,7 +211,8 @@ internal class MobileStorage(activity: Activity,
         checkCancel()
         transaction {
             set("generation-$ns",gen)
-            set("namespace",ns);set("cursor",JSONObject().put("epoch",cp.getString("epoch")).put("revision",cp.getLong("revision")).toString())
+            set("activity-metadata-$ns","1")
+            set("namespace",ns);set("cursor",JSONObject().put("epoch",cp.getString("epoch")).put("revision",cp.getLong("revision")).put("seriesRevision",cp.optString("seriesRevision","")).toString())
             db.execSQL("DELETE FROM stage");db.execSQL("DELETE FROM settings WHERE k='checkpoint'")
         }
         // Superseded extracted metadata only; downloaded files/user storage are separate.
@@ -183,6 +226,7 @@ internal class MobileStorage(activity: Activity,
         if(row.optBoolean("deleted") && !row.has("title")) {db.execSQL("UPDATE catalog SET deleted=1,available=0 WHERE ns=? AND gen=? AND id=?",arrayOf(ns,gen,id));return}
         val v=ContentValues().apply {
             put("ns",ns);put("gen",gen);put("id",id);put("json",row.toString());put("title",row.optString("title"));put("creator",row.optString("creator"));put("series",row.optString("series"));put("search",row.optString("search"));put("available",if(row.optBoolean("available")&&!row.optBoolean("deleted"))1 else 0);put("deleted",if(row.optBoolean("deleted"))1 else 0);put("modified",row.optLong("modified"));put("dateAdded",row.optLong("dateAdded"))
+            SeriesCatalog.putValues(this,row)
         };check(db.insertWithOnConflict("catalog",null,v,SQLiteDatabase.CONFLICT_REPLACE)>=0)
     }
     private fun download(ns:String,id:String) {
@@ -237,34 +281,44 @@ internal class MobileStorage(activity: Activity,
     private fun markOpened(args:JSONObject):JSONObject {
         val ns=valid(args.getString("ns"));val id=valid(args.getString("id"))
         require(downloadRow(ns,id)!=null) {"No downloaded copy"}
-        val previous=JSONArray(setting("recent-books-"+ns)?:"[]")
-        val recent=JSONArray().put(id)
-        for(i in 0 until previous.length()) {
-            val old=previous.getString(i)
-            if(old!=id && recent.length()<5)recent.put(old)
-        }
-        db.execSQL("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)",arrayOf("recent-books-"+ns,recent.toString()))
+        UserSyncStorage.rememberRead(db,ns,id)
         return JSONObject()
     }
     private fun browse(args:JSONObject):JSONObject {
         val ns=args.optString("ns",setting("namespace")?:""); val offset=args.optInt("offset",0);require(offset in 0..1_000_000)
         val query=args.optString("query");require(query.length<=512)
+        val selectedSeries=args.optString("selectedSeries");val selectedCopy=args.optString("selectedCopy")
+        require(selectedSeries.length<=128 && selectedCopy.length<=128)
+        val confidence=when(args.optString("seriesConfidence","high")) {"high"->1;"medium"->2;"all"->3;else->throw IllegalArgumentException("Invalid series confidence")}
         val normalized=Normalizer.normalize(query,Normalizer.Form.NFKC).lowercase(Locale.ROOT).trim().replace(Regex("\\s+")," ")
         val params=mutableListOf(ns)
         var where="c.ns=? AND c.gen=(SELECT v FROM settings WHERE k='generation-'||c.ns)"
-        if(normalized.isNotEmpty()) {where+=" AND (instr(lower(c.search),?)>0 OR instr(lower(c.search),?)>0)";params.add(normalized);params.add(args.optString("romajiQuery",normalized))}
-        when(args.optString("filter")) {"downloaded"->where+=" AND d.id IS NOT NULL";"available"->where+=" AND c.available=1 AND c.deleted=0";"unavailable"->where+=" AND (c.available=0 OR c.deleted=1)";"finished"->where+=" AND json_extract(c.json,'$.readingStatus')='finished'"}
+        if(normalized.isNotEmpty()) {where+=" AND (instr(lower(c.search),?)>0 OR instr(lower(c.search),?)>0 OR (c.seriesConfidence BETWEEN 1 AND $confidence AND instr(lower(c.seriesTitle),?)>0))";params.add(normalized);params.add(args.optString("romajiQuery",normalized));params.add(normalized)}
+        if(selectedSeries.isNotEmpty()) {where+=" AND c.seriesKey=? AND c.seriesConfidence BETWEEN 1 AND $confidence";params.add(selectedSeries)}
+        if(selectedCopy.isNotEmpty()) {require(selectedSeries.isNotEmpty());where+=" AND c.copyKey=?";params.add(selectedCopy)}
+        when(args.optString("filter")) {"want"->where+=" AND json_extract(c.json,'$.readingStatus')='want'";"downloaded"->where+=" AND d.id IS NOT NULL";"available"->where+=" AND c.available=1 AND c.deleted=0";"unavailable"->where+=" AND (c.available=0 OR c.deleted=1)";"finished"->where+=" AND json_extract(c.json,'$.readingStatus')='finished'"}
         for(key in listOf("tags","collections")) {val name=args.optString(key);if(name.isNotEmpty()) {where+=" AND EXISTS(SELECT 1 FROM json_each(c.json,'$.$key') m WHERE json_extract(m.value,'$.name')=?)";params.add(name)}}
         val recent=args.optBoolean("recent")
-        if(recent)where+=" AND d.id IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(COALESCE((SELECT v FROM settings WHERE k='recent-books-'||c.ns),'[]')) r WHERE r.value=c.id)"
+        if(recent)where+=" AND COALESCE(json_extract(c.json,'$.readingStatus'),'unset') NOT IN ('paused','finished') AND EXISTS(SELECT 1 FROM json_each(COALESCE((SELECT v FROM settings WHERE k='recent-books-'||c.ns),'[]')) r WHERE r.value=c.id)"
         val sort=if(recent)"(SELECT CAST(r.key AS INTEGER) FROM json_each((SELECT v FROM settings WHERE k='recent-books-'||c.ns)) r WHERE r.value=c.id)" else when(args.optString("sort")) {"author"->"c.creator COLLATE NOCASE,c.title COLLATE NOCASE";"series"->"c.series COLLATE NOCASE,c.title COLLATE NOCASE";"modified"->"c.modified DESC";"dateAdded"->"c.dateAdded DESC";else->"c.title COLLATE NOCASE"}
-        val rows=JSONArray();db.rawQuery("SELECT c.json,c.deleted,c.available,d.version,d.file,d.bytes FROM catalog c LEFT JOIN downloads d ON d.ns=c.ns AND d.id=c.id WHERE $where ORDER BY $sort,c.id LIMIT 25 OFFSET $offset",params.toTypedArray()).use {c ->while(c.moveToNext()) {
+        val groupSeries=!recent && selectedSeries.isEmpty() && args.optBoolean("consolidateSeries")
+        val groupCopies=!recent && selectedSeries.isNotEmpty() && selectedCopy.isEmpty() && args.optBoolean("groupCopies",true)
+        val grouped=groupSeries || groupCopies
+        val groupKey=if(groupSeries) "CASE WHEN c.seriesKey<>'' AND c.seriesConfidence BETWEEN 1 AND $confidence THEN c.seriesKey ELSE 'book:'||c.id END" else if(groupCopies) "c.copyKey" else "'book:'||c.id"
+        val groupTitle=if(groupSeries) "c.seriesTitle" else "c.title"
+        val filtered="SELECT c.*,d.version AS downloadVersion,d.file AS downloadFile,d.bytes AS downloadBytes,$groupKey AS groupKey,$groupTitle AS groupTitle FROM catalog c LEFT JOIN downloads d ON d.ns=c.ns AND d.id=c.id WHERE $where"
+        val resultSort=if(groupSeries) "CASE WHEN g.groupCount>1 THEN 0 ELSE 1 END,"+sort.replace("c.","f.") else if(selectedSeries.isNotEmpty()) "f.seriesOrder,f.title COLLATE NOCASE" else sort.replace("c.","f.")
+        val sql=SeriesCatalog.groupedSql(filtered,resultSort,grouped)
+        params.add(offset.toString())
+        val rows=JSONArray();db.rawQuery(sql,params.toTypedArray()).use {c ->while(c.moveToNext()) {
             val row=JSONObject(c.getString(0)).put("ns",ns).put("deleted",c.getInt(1)==1).put("available",c.getInt(2)==1)
             if(!c.isNull(3) && File(books,c.getString(4)).isFile) row.put("download",JSONObject().put("version",c.getString(3)).put("file",c.getString(4)).put("bytes",c.getLong(5)))
+            if(groupSeries && c.getInt(8)>1)row.put("seriesCard",JSONObject().put("key",c.getString(6)).put("name",c.getString(7)).put("count",c.getInt(8)))
+            if(groupCopies && c.getInt(8)>1)row.put("copyGroup",JSONObject().put("key",c.getString(6)).put("count",c.getInt(8)))
             rows.put(row)
         }}
         val namespaces=JSONArray();db.rawQuery("SELECT DISTINCT ns FROM catalog ORDER BY ns",null).use {while(it.moveToNext())namespaces.put(it.getString(0))}
-        return JSONObject().put("items",rows).put("ns",ns).put("namespaces",namespaces).put("next",if(rows.length()==25)offset+25 else JSONObject.NULL)
+        return JSONObject().put("items",rows).put("ns",ns).put("namespaces",namespaces).put("seriesReady",setting("cursor")?.let {JSONObject(it).optString("seriesRevision","").isNotEmpty()}?:false).put("next",if(rows.length()==25)offset+25 else JSONObject.NULL)
     }
     private fun usage()=covers.listFiles()?.sumOf {it.length()}?:0L
     private fun budget()=(setting("budget")?:"100000000").toLong()
@@ -356,12 +410,21 @@ internal class MobileStorage(activity: Activity,
         if(action=="coverGeneration") {coverGeneration.set(args.getLong("generation"));coverSockets.values.forEach {it.disconnect()};resolve(JSONObject());return}
         if(action=="coverCancel") {val token=args.getString("token");if(activeCovers.contains(token))obsolete.add(token);coverSockets[token]?.disconnect();resolve(JSONObject());return}
         if(action=="status") {resolve(JSONObject(status.toString()));return}
-        if(action=="userSync") {resolve(userData.start());return}
-        if(action=="userSyncStatus") {resolve(userData.status());return}
+        if(action=="userSync") {resolve(userData.start().put("activity",readingActivity.start()));return}
+        if(action=="activitySync") {resolve(readingActivity.start());return}
+        if(action=="userSyncStatus") {resolve(userData.status().put("activity",readingActivity.status()));return}
+        if(action=="userPrepareOpen") {
+            network.execute {try {resolve(userData.prepareOpen(args))} catch(e:Exception) {invoke.reject(e.message?:"PC position unavailable")}}
+            return
+        }
         if(action=="sync" || action=="download") {
             if(!running.compareAndSet(false,true)) {invoke.reject("A catalog/transfer job is already running");return}
             canceled.set(false);progress("Starting")
-            network.execute {try {if(action=="sync")sync() else download(valid(args.getString("ns")),valid(args.getString("id")));status=JSONObject().put("busy",false).put("message","Complete")}
+            network.execute {try {if(action=="sync")sync() else download(valid(args.getString("ns")),valid(args.getString("id")));status=JSONObject().put("busy",false).put("message",if(action=="sync") {
+                val ns=setting("namespace")?:""
+                val count=db.rawQuery("SELECT count(*) FROM catalog WHERE ns=? AND gen=?",arrayOf(ns,setting("generation-$ns")?:"")).use {it.moveToFirst();it.getLong(0)}
+                "Complete: $count books in local catalog"
+            } else "Complete")}
                 catch(e:Exception) {status=JSONObject().put("busy",false).put("message",e.message?:"Operation failed")}
                 finally {running.set(false)}}
             resolve(JSONObject().put("busy",true));return
@@ -370,13 +433,14 @@ internal class MobileStorage(activity: Activity,
         if(action=="cover")activeCovers.add(args.optString("token"))
         try {executor.execute {try {
             val result=when(action) {
+                "activityStart","activityRecord","activitySummary","activitySettings","activityClear"->readingActivity.command(args)
                 "browse"->browse(args)
                 "markOpened"->markOpened(args)
                 "cover"->cover(args)
                 "remove"->removeCopy(args)
                 "cacheSettings"->cacheSettings(args)
                 "userState"->userData.state(args)
-                "userSave"->userData.save(args)
+                "userSave"->userData.save(args).also {userData.start()}
                 "historyRecord"->userData.historyRecord(args)
                 "historyList"->userData.historyList(args)
                 "historyDelete"->userData.historyDelete(args)

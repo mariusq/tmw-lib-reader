@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LookupRecord {
+    #[serde(default)] pub activity_generation: Option<String>,
+    #[serde(default)]
+    pub activity_day: Option<String>,
     pub surface: String,
     pub entry_id: Option<i64>,
     pub headword: Option<String>,
@@ -73,6 +76,8 @@ mod tests {
 
     fn request(surface: &str, entry_id: Option<i64>) -> LookupRecord {
         LookupRecord {
+            activity_generation: None,
+            activity_day: None,
             surface: surface.into(),
             entry_id,
             headword: None,
@@ -290,7 +295,8 @@ pub struct LookupHistory {
 
 impl Database {
     pub fn record_lookup(&self, request: &LookupRecord) -> rusqlite::Result<Option<i64>> {
-        if request.surface.trim().is_empty()
+        if request.activity_day.as_ref().is_some_and(|day| !super::activity::valid_day(day))
+            || request.surface.trim().is_empty()
             || request.surface.chars().count() > 256
             || request.headword.as_ref().is_some_and(|v| v.chars().count() > 256)
             || request.reading.as_ref().is_some_and(|v| v.chars().count() > 256)
@@ -304,6 +310,10 @@ impl Database {
         }
         let mut connection = self.connection.lock().expect("database mutex poisoned");
         let transaction = connection.transaction()?;
+        if let Some(day) = &request.activity_day {
+            let tracking: bool = transaction.query_row("SELECT value='true' FROM app_settings WHERE key='reading_activity_enabled'",[],|r|r.get(0))?;
+            if tracking && request.activity_generation.as_ref().is_none_or(|g|super::activity_sync::epoch(&transaction).ok().as_ref()==Some(g)) {super::activity_sync::local(&transaction,request.book_id,serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"kind":"lookup","day":day}))?;}
+        }
         let enabled: Option<String> = transaction
             .query_row(
                 "SELECT value FROM app_settings WHERE key='lookup_history_enabled'",
@@ -312,6 +322,7 @@ impl Database {
             )
             .optional()?;
         if enabled.as_deref() == Some("false") {
+            transaction.commit()?;
             return Ok(None);
         }
         let (headword, reading): (Option<String>, Option<String>) = if request.dictionary_id.is_some() {
