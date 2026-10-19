@@ -27,6 +27,7 @@ export default function UserSyncStatus() {
         {status?.message ?? "Checking saved-data sync…"}
         {status ? ` · ${status.pending} pending` : ""}
       </p>
+      {status?.activity && <p aria-live="polite">Reading activity: {status.activity.message} · {status.activity.pending} pending{status.activity.rejected ? ` · ${status.activity.rejected} rejected` : ""}</p>}
       {!!status?.rejected?.length && (
         <details>
           <summary>Updates need attention ({status.rejected.length})</summary>
@@ -48,7 +49,7 @@ export default function UserSyncStatus() {
       {error && <p role="alert">{error}</p>}
       <button
         className="control"
-        disabled={status?.busy}
+        disabled={status?.busy || status?.activity?.busy}
         onClick={() => {
           setError("");
           void mobileUser<SyncStatus>({ action: "userSync" })

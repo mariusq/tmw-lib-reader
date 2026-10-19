@@ -1,3 +1,4 @@
+import { localDay } from "../../../packages/reader-core/readingActivity";
 import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,6 +7,8 @@ import { EpubReader } from "./EpubReader";
 const mock = vi.hoisted(() => ({
   listeners: new Map<string, (...args: unknown[]) => void>(),
   display: vi.fn(async () => {}),
+  next: vi.fn(async () => {}),
+  prev: vi.fn(async () => {}),
   contents: [] as Array<{ document: Document; cfiFromRange: (range: Range) => string }>,
 }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -20,7 +23,13 @@ vi.mock("epubjs", () => ({
     destroy: vi.fn(),
     renderTo: () => ({
       display: mock.display,
-      on: (name: string, fn: (...args: unknown[]) => void) => mock.listeners.set(name, fn),
+      next: mock.next,
+      prev: mock.prev,
+      currentLocation: () => ({}),
+      on: (name: string, fn: (...args: unknown[]) => void) => {
+        const previous = mock.listeners.get(name);
+        mock.listeners.set(name, (...args) => { previous?.(...args); fn(...args); });
+      },
       getContents: () => mock.contents,
       destroy: vi.fn(),
       themes: { default: vi.fn(), fontSize: vi.fn() },
@@ -29,12 +38,16 @@ vi.mock("epubjs", () => ({
 }));
 beforeEach(() => {
   mock.listeners.clear();
-  mock.display.mockClear();
+  mock.display.mockReset();
+  mock.next.mockReset();
+  mock.prev.mockReset();
+  localStorage.clear();
   mock.contents = [];
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "get_reader_book") return { id: 1, filePath: "read-only.epub", title: "物語" };
-    if (command === "get_reading_location") return null;
+    if (command === "get_reader_position") return { locationCfi: null, token: "initial", accepted: true };
+    if (command === "save_reader_position") return { locationCfi: null, token: "saved", accepted: true };
     if (command === "lookup_reader_text" || command === "lookup_dictionary")
       return {
         engineVersion: 1,
@@ -52,6 +65,80 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+it("does not write the rounded opening position or write again on close", async () => {
+  mock.display.mockImplementationOnce(async () => {
+    mock.listeners.get("relocated")?.({ start: { cfi: "epubcfi(/6/2)" } });
+  });
+  const { unmount } = render(<EpubReader bookId={1} onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("record_reader_open", { bookId: 1 }));
+  unmount();
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_reader_position" || command === "save_reading_location")).toBe(false);
+});
+
+it("follows the synced position on foreground refresh without writing when unchanged locally", async () => {
+  let remote = false;
+  vi.mocked(invoke).mockImplementation(async command => {
+    if (command === "get_reader_book") return { id: 1, filePath: "fixture.epub", title: "Fixture" };
+    if (command === "get_reader_position") return { locationCfi: remote ? "epubcfi(/6/80)" : "epubcfi(/6/20)", token: remote ? "phone" : "initial", accepted: true };
+    return false;
+  });
+  render(<EpubReader bookId={1} onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("record_reader_open", { bookId: 1 }));
+  remote = true;
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  expect(mock.display).toHaveBeenCalledWith("epubcfi(/6/80)");
+  expect(screen.queryByText("Reading position updated on another device.")).toBeNull();
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_reader_position")).toBe(false);
+});
+
+it("ignores layout relocations and saves a deliberate backwards turn", async () => {
+  render(<EpubReader bookId={1} onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("record_reader_open", { bookId: 1 }));
+  const relocate = (cfi: string) => mock.listeners.get("relocated")?.({ start: { cfi } });
+  const writes = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_reader_position");
+  await act(async () => {
+    window.dispatchEvent(new Event("resize"));
+    relocate("resize-cfi");
+    fireEvent.click(screen.getByLabelText("Increase font size"));
+    mock.listeners.get("rendered")?.();
+    relocate("reflow-cfi");
+  });
+  expect(writes()).toHaveLength(0);
+  mock.prev.mockImplementationOnce(async () => { relocate("earlier-cfi"); });
+  fireEvent.click(screen.getByLabelText("Previous page"));
+  await waitFor(() => expect(writes()).toHaveLength(1));
+  expect(writes()[0][1]).toEqual({ bookId: 1, locationCfi: "earlier-cfi", expectedToken: "initial" });
+  await act(async () => { relocate("another-layout-cfi"); });
+  expect(writes()).toHaveLength(1);
+});
+
+it("preserves local navigation across re-pagination and offers an explicit synced jump", async () => {
+  let remote = false;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "get_reader_book") return { id: 1, filePath: "fixture.epub", title: "Fixture" };
+    if (command === "get_reader_position") return { locationCfi: remote ? "phone-cfi" : "old-cfi", token: remote ? "phone" : "initial", accepted: true };
+    if (command === "save_reader_position") return { locationCfi: (args as { locationCfi: string }).locationCfi, token: "local", accepted: true };
+    return false;
+  });
+  mock.next.mockImplementationOnce(async () => {
+    mock.listeners.get("relocated")?.({ start: { cfi: "local-cfi" } });
+  });
+  render(<EpubReader bookId={1} onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("record_reader_open", { bookId: 1 }));
+  fireEvent.click(screen.getByLabelText("Next page"));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_reader_position", { bookId: 1, locationCfi: "local-cfi", expectedToken: "initial" }));
+  fireEvent.click(screen.getByLabelText("Hide furigana"));
+  await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "record_reader_open")).toHaveLength(2));
+  remote = true;
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  expect(screen.getByText("Reading position updated on another device.")).toBeTruthy();
+  expect(mock.display).not.toHaveBeenCalledWith("phone-cfi");
+  await act(async () => { fireEvent.click(screen.getByText("Go to synced position")); });
+  expect(mock.display).toHaveBeenCalledWith("phone-cfi");
+  expect(screen.queryByText("Reading position updated on another device.")).toBeNull();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_reader_position")).toHaveLength(1);
+});
 
 it("saves the clicked ruby-free sentence and precise CFI in one action", async () => {
   const source = document.implementation.createHTMLDocument();
@@ -100,8 +187,8 @@ it("opens a bookmark anchor instead of the normal resume position", async () => 
   vi.mocked(invoke).mockImplementation(async (command) =>
     command === "get_reader_book"
       ? { id: 1, filePath: "book.epub", title: "Book" }
-      : command === "get_reading_location"
-        ? "resume-cfi"
+      : command === "get_reader_position"
+        ? { locationCfi: "resume-cfi", token: "initial", accepted: true }
         : command === "list_dictionaries"
           ? []
           : false,
@@ -138,6 +225,7 @@ it("records one encounter with portable dictionary identity and leaves manual qu
   expect(records()).toHaveLength(1);
   expect(records()[0][1]).toEqual({
     request: {
+      activityDay: localDay(new Date()),
       surface: "読んだ",
       entryId: null, headword: "読む", reading: "よむ", dictionaryId: "yomitan:JMdict:fixture",
       bookId: 1,
@@ -151,7 +239,7 @@ it("records one encounter with portable dictionary identity and leaves manual qu
   fireEvent.click(screen.getByText("Look up"));
   await waitFor(() => expect(records()).toHaveLength(2));
   expect(records()[1][1]).toEqual({
-    request: { surface: "読む", entryId: null, headword: "読む", reading: "よむ", dictionaryId: "yomitan:JMdict:fixture", bookId: null, locationCfi: "", sentence: "" },
+    request: { activityDay: localDay(new Date()), surface: "読む", entryId: null, headword: "読む", reading: "よむ", dictionaryId: "yomitan:JMdict:fixture", bookId: null, locationCfi: "", sentence: "" },
   });
   expect(screen.queryByText("Save passage")).not.toBeInTheDocument();
 });

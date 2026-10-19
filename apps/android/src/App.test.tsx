@@ -4,6 +4,7 @@ import App from "./App";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => { throw new Error("Missing copy"); }) }));
 vi.mock("./Catalog", () => ({ default: ({ onOpen }: { onOpen: (book: unknown) => void }) => <button onClick={() => onOpen({ name: "Replacement", bytes: new ArrayBuffer(0) })}>Open replacement</button> }));
+vi.mock("./ReadingHome", () => ({ default: () => null }));
 vi.mock("./Reader", () => ({ default: () => <p>Replacement reader</p> }));
 vi.mock("./ConnectionSettings", () => ({ default: () => null }));
 vi.mock("./RecoverySettings", () => ({ default: () => null }));

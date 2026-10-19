@@ -9,6 +9,42 @@ import org.junit.Test
 import java.io.File
 
 class UserSyncStorageTest {
+    @Test fun openingWaitsForAllCanonicalPagesAndDoesNotCreatePhoneProgress() {
+        val db=SQLiteDatabase.create(null);val ns="a".repeat(32);val book="b".repeat(32);val ver="sha256-"+"c".repeat(64)
+        val args=JSONObject().put("ns",ns).put("id",book).put("version",ver)
+        var requests=0
+        val store=UserSyncStorage(db,{ns},{body ->
+            requests++
+            assertEquals(0,body.getJSONArray("operations").length())
+            val cursor=body.getLong("cursor")+1
+            val row=JSONObject().put("bookId",book).put("kind","progress").put("contentVersion",ver)
+                .put("fields",JSONObject().put("locationCfi",if(cursor==1L)"epubcfi(/6/20)" else "epubcfi(/6/80)"))
+            JSONObject().put("protocolVersion",3).put("catalogId",ns).put("cursor",cursor).put("hasMore",cursor==1L)
+                .put("acknowledged",JSONArray()).put("rejected",JSONArray()).put("changes",JSONArray().put(row))
+        },false)
+        try {
+            val state=store.prepareOpen(args)
+            assertEquals(2,requests)
+            assertEquals("epubcfi(/6/80)",state.getJSONObject("progress").getJSONObject("fields").getString("locationCfi"))
+            assertEquals(0,state.getInt("pending"))
+        } finally {db.close()}
+    }
+    @Test fun desktopProgressAddsRecentBookWithoutDownloadAndLocalReadingSurvivesPull() {
+        val db=SQLiteDatabase.create(null);val ns="a".repeat(32);val remote="b".repeat(32);val local="c".repeat(32);val ver="sha256-"+"d".repeat(64)
+        val store=UserSyncStorage(db,{ns},{body ->
+            JSONObject().put("protocolVersion",3).put("catalogId",ns).put("cursor",1).put("hasMore",false)
+                .put("acknowledged",JSONArray()).put("rejected",JSONArray())
+                .put("changes",if(body.getLong("cursor")==0L)JSONArray().put(JSONObject().put("sequence",1).put("bookId",remote).put("kind","progress").put("contentVersion",ver).put("fields",JSONObject().put("locationCfi","epubcfi(/6/2)"))) else JSONArray())
+        },false)
+        try {
+            store.sync()
+            fun recent()=db.rawQuery("SELECT v FROM settings WHERE k=?",arrayOf("recent-books-"+ns)).use {it.moveToFirst();JSONArray(it.getString(0))}
+            assertEquals(remote,recent().getString(0))
+            UserSyncStorage.rememberRead(db,ns,local)
+            store.sync()
+            assertEquals(local,recent().getString(0));assertEquals(remote,recent().getString(1))
+        } finally {db.close()}
+    }
     @Test fun historyCapabilityUpgradeReplaysSkippedJournalOnce() {
         val db=SQLiteDatabase.create(null);val ns="a".repeat(32)
         try {

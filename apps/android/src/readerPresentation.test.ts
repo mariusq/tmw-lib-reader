@@ -24,6 +24,22 @@ it("leaves fixed-layout pages intact", () => {
   prepareReaderDocument(doc, 24, true);
   expect(doc.documentElement.outerHTML).toBe(before);
 });
+it("selects Japanese fallback for EPUBs with missing or incorrect language", () => {
+  const doc = new DOMParser().parseFromString(
+    '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh" lang="en"><head/><body lang="zh"><p style="font-family: SimSun"><ruby>骨直令<rt>ほね</rt></ruby></p></body></html>',
+    "application/xhtml+xml",
+  );
+  const text = doc.body.textContent;
+  prepareReaderDocument(doc, 20);
+  for (const element of [doc.documentElement, doc.body]) {
+    expect(element.getAttribute("lang")).toBe("ja");
+    expect(element.getAttributeNS("http://www.w3.org/XML/1998/namespace", "lang")).toBe("ja");
+  }
+  const css = doc.querySelector("[data-tmw-reader]")?.textContent;
+  expect(css).toContain('html, body, body * {-webkit-locale:"ja" !important;');
+  expect(css).toContain('font-family:"Noto Serif CJK JP","Noto Serif JP",serif !important;');
+  expect(doc.body.textContent).toBe(text);
+});
 it("bounds persisted font size", () => {
   expect(readerFontSize(null)).toBe(20);
   expect(readerFontSize("24")).toBe(24);

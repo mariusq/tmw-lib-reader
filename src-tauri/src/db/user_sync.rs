@@ -62,7 +62,11 @@ impl Database {
         size: i64,
         modified: i64,
     ) -> rusqlite::Result<()> {
-        self.connection.lock().unwrap().execute("INSERT INTO companion_content_versions VALUES(?1,?2,?3,?4) ON CONFLICT(book_id) DO UPDATE SET version=excluded.version,source_size=excluded.source_size,source_modified=excluded.source_modified",params![id,version,size,modified])?;
+        let mut c=self.connection.lock().unwrap();let tx=c.transaction()?;
+        tx.execute("INSERT INTO companion_content_versions VALUES(?1,?2,?3,?4) ON CONFLICT(book_id) DO UPDATE SET version=excluded.version,source_size=excluded.source_size,source_modified=excluded.source_modified",params![id,version,size,modified])?;
+        let matches:bool=tx.query_row("SELECT file_size=?2 AND modified_time=?3 FROM books WHERE id=?1",params![id,size,modified],|r|r.get(0))?;
+        if matches {super::activity_sync::promote_version(&tx,id,&format!("{size}:{modified}"),version)?;}
+        tx.commit()?;
         Ok(())
     }
     pub fn user_sync(&self, device: &str, q: SyncRequest) -> Result<Value, &'static str> {
@@ -307,6 +311,10 @@ fn apply(
             return Ok(Some("invalid_progress"));
         }
         tx.execute("INSERT INTO reading_progress(book_id,location_cfi,updated_at,content_version) VALUES(?1,?2,?3,?4) ON CONFLICT(book_id) DO UPDATE SET location_cfi=excluded.location_cfi,updated_at=excluded.updated_at,content_version=excluded.content_version",params![id,text("locationCfi"),unix_timestamp(),op.content_version])?;
+        if !text("locationCfi").is_empty() {
+            tx.execute("UPDATE books SET reading_status='reading' WHERE id=?1 AND reading_status IN ('unset','want')", [id])?;
+            tx.execute("INSERT INTO reader_resume(book_id,last_read_at,finished) VALUES(?1,?2,(SELECT reading_status='finished' FROM books WHERE id=?1)) ON CONFLICT(book_id) DO UPDATE SET last_read_at=excluded.last_read_at", params![id,unix_timestamp()])?;
+        }
     } else if let Some(pid) = existing {
         if op
             .fields
@@ -366,6 +374,25 @@ mod tests {
     }
     fn request(namespace: &str, ops: Value) -> SyncRequest {
         serde_json::from_value(json!({"catalogId":namespace,"operations":ops})).unwrap()
+    }
+    #[test]
+    fn reader_position_conflict_preserves_phone_progress_and_allows_explicit_backwards_choice() {
+        let (_temp, db, id, book, ns)=setup();
+        let opened=db.reader_position(id).unwrap();
+        let saved=db.save_reader_position(id,"epubcfi(/6/20)",&opened.token).unwrap();
+        assert!(saved.accepted);
+        db.user_sync("phone",request(&ns,json!([op("phone-position",1,&book,"progress",json!({"locationCfi":"epubcfi(/6/80)"}))]))).unwrap();
+        let stale=db.save_reader_position(id,"epubcfi(/6/22)",&saved.token).unwrap();
+        assert!(!stale.accepted);
+        assert_eq!(stale.location_cfi.as_deref(),Some("epubcfi(/6/80)"));
+        assert_eq!(db.reading_location(id).unwrap().as_deref(),Some("epubcfi(/6/80)"));
+        let chosen=db.save_reader_position(id,"epubcfi(/6/10)",&stale.token).unwrap();
+        assert!(chosen.accepted);
+        let unchanged=db.save_reader_position(id,"epubcfi(/6/10)",&chosen.token).unwrap();
+        assert_eq!(chosen.token,unchanged.token);
+        // A metadata/content replacement also invalidates an open reader's token.
+        db.connection.lock().unwrap().execute("UPDATE books SET modified_time=2 WHERE id=?1",[id]).unwrap();
+        assert!(!db.save_reader_position(id,"epubcfi(/6/12)",&chosen.token).unwrap().accepted);
     }
     fn op(id: &str, sequence: i64, book: &str, kind: &str, fields: Value) -> Value {
         json!({"id":id,"sequence":sequence,"bookId":book,"kind":kind,"entityId":"12345678901234567890123456789012","contentVersion":"sha256-test","fields":fields})
@@ -477,6 +504,7 @@ mod tests {
         ]);
         db.user_sync("phone", request(&ns, progress)).unwrap();
         assert_eq!(db.reading_location(id).unwrap().unwrap(), "epubcfi(/6/2)");
+        assert_eq!(db.resume_books(false).unwrap()[0].id, id);
         db.save_reading_location(id, "epubcfi(/6/8)").unwrap();
         let pull = db.user_sync("phone", request(&ns, json!([]))).unwrap();
         assert_eq!(

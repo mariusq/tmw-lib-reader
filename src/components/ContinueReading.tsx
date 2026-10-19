@@ -4,7 +4,7 @@ import { EpubReader } from "../features/reader/EpubReader";
 
 type ResumeBook = { id: number; title: string; creator: string; coverPath: string | null; lastReadAt: number; hasLocation: boolean; isAvailable: boolean };
 
-export function ContinueReading({ language, onLibrary, onRoots }: { language: "ja" | "en"; onLibrary: () => void; onRoots: () => void }) {
+export function ContinueReading({ language, onLibrary, onRoots, showCovers = true, compact = false, onRefresh }: { language: "ja" | "en"; onLibrary: () => void; onRoots: () => void; showCovers?: boolean; compact?: boolean; onRefresh?: () => void }) {
   const [books, setBooks] = useState<ResumeBook[]>([]);
   const [primary, setPrimary] = useState<ResumeBook | null>(null);
   const [readerId, setReaderId] = useState<number | null>(null);
@@ -36,25 +36,34 @@ export function ContinueReading({ language, onLibrary, onRoots }: { language: "j
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
   }, [revision]);
-  return <section className="w-full self-start">
-    <p className="text-sm font-medium text-amber-300">TMW Library</p>
-    <h1 className="mt-1 text-3xl font-semibold">{ja ? "続きを読む" : "Continue Reading"}</h1>
-    <p className="mt-3 text-stone-400">{ja ? "最後に読んだ場所から、また物語へ。" : "Return to your story, right where you left off."}</p>
+  useEffect(() => {
+    if (readerId !== null) return;
+    const refresh = () => { if (document.visibilityState === "visible") setRevision(value => value + 1); };
+    const timer = setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    return () => { clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [readerId]);
+  return <section className={`w-full self-start ${compact ? "resume-compact" : ""}`}>
+    {!compact && <p className="text-sm font-medium text-amber-300">TMW Library</p>}
+    <div className={compact ? "resume-heading" : undefined}>
+    <h2 className="mt-1 text-2xl font-semibold">{ja ? "続きを読む" : "Continue Reading"}</h2>
     <div className="my-6 flex flex-wrap gap-3">
       {primary && <button className="primary" onClick={() => setReaderId(primary.id)}>{ja ? "続きを読む" : "Continue reading"}: {primary.title}</button>}
       <button className="rounded-xl border border-white/20 px-5 py-3" onClick={onLibrary}>{ja ? "すべての本を見る" : "Browse full library"}</button>
     </div>
+    </div>
     {error && <p role="alert" className="mb-4 text-red-300">{error}</p>}
     {loading ? <p role="status">{ja ? "読み込み中…" : "Loading…"}</p> : books.length === 0 ?
       <div className="rounded-xl border border-dashed border-white/15 p-8 text-stone-400"><p>{ja ? "ライブラリから本を開くと、ここから再開できます。" : "Open a book from your library and it will appear here next time."}</p><button className="mt-4 text-amber-300 underline" onClick={onRoots}>{ja ? "ライブラリフォルダーを追加" : "Add a library folder"}</button></div> :
-      <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+      <div className={compact ? "resume-rows" : "grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6"}>
         {books.map(book => <article key={book.id} className="group relative min-w-0">
-          <button disabled={!book.isAvailable} className="w-full text-left disabled:opacity-50" onClick={() => setReaderId(book.id)} aria-label={`${ja ? "続きを読む" : "Resume"}: ${book.title}`}>
-            <ResumeCover path={book.coverPath} />
-            <h2 className="mt-3 truncate font-medium" title={book.title}>{book.title}</h2>
+          <button disabled={!book.isAvailable} className="resume-book-button w-full text-left disabled:opacity-50" onClick={() => setReaderId(book.id)} aria-label={`${ja ? "続きを読む" : "Resume"}: ${book.title}`}>
+            <ResumeCover key={`${book.id}-${showCovers}`} path={showCovers ? book.coverPath : null} />
+            <div className="resume-book-info"><h3 className="mt-3 line-clamp-2 font-medium" title={book.title}>{book.title}</h3>
             <p className="truncate text-sm text-stone-400">{book.creator}</p>
             <p className="mt-2 text-xs text-stone-400">{new Intl.DateTimeFormat(ja ? "ja-JP" : "en", { dateStyle: "medium", timeStyle: "short" }).format(book.lastReadAt * 1000)}</p>
             <p className="mt-1 text-xs text-amber-200">{book.hasLocation ? (ja ? "読書位置を保存済み" : "Saved reading position") : (ja ? "読書位置なし · 最初から開く" : "No saved position · opens at the beginning")}</p>
+            </div>
           </button>
           <button disabled={removing !== null} className="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-lg border border-white/25 bg-stone-950/45 text-white shadow-[0_2px_8px_rgba(0,0,0,0.15)] backdrop-blur-md transition-[opacity,background-color,border-color] duration-150 hover:border-white/50 hover:bg-stone-950/75 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-wait disabled:opacity-40 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100" title={ja ? "最近読んだ本から削除（読書位置は保持されます）" : "Remove from recently read (saved position is kept)"} aria-label={`${ja ? "最近読んだ本から削除" : "Remove from recently read"}: ${book.title}`} onClick={() => void removeBook(book.id)}>
             <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="m6 6 12 12M18 6 6 18" /></svg>
@@ -62,11 +71,11 @@ export function ContinueReading({ language, onLibrary, onRoots }: { language: "j
           {!book.isAvailable && <div className="mt-2 text-xs text-red-200"><p>{ja ? "ソースが見つかりません。フォルダーを接続して再スキャンしてください。" : "Source unavailable. Reconnect its folder and rescan."}</p><button className="mt-2 underline" onClick={onRoots}>{ja ? "ライブラリルート" : "Library roots"}</button></div>}
         </article>)}
       </div>}
-    {readerId !== null && <EpubReader bookId={readerId} onClose={() => { setReaderId(null); setRevision(value => value + 1); }} />}
+    {readerId !== null && <EpubReader bookId={readerId} onClose={() => { setReaderId(null); setRevision(value => value + 1); onRefresh?.(); }} />}
   </section>;
 }
 
 function ResumeCover({ path }: { path: string | null }) {
   const [broken, setBroken] = useState(false);
-  return <div className="aspect-[2/3] overflow-hidden rounded-xl bg-stone-900">{path && !broken ? <img src={convertFileSrc(path)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken(true)} /> : <div className="grid h-full place-items-center text-3xl text-amber-200/60">本</div>}</div>;
+  return <div className="resume-cover aspect-[2/3] overflow-hidden rounded-xl bg-stone-900">{path && !broken ? <img src={convertFileSrc(path)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken(true)} /> : <div className="grid h-full place-items-center text-3xl text-amber-200/60">本</div>}</div>;
 }

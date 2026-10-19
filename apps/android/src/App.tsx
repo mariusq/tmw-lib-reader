@@ -1,8 +1,10 @@
 import ConnectionSettings from "./ConnectionSettings";
 import RecoverySettings from "./RecoverySettings";
+import SeriesPreferences from "./SeriesPreferences";
 import DictionaryManager from "../../../packages/reader-core/DictionaryManager";
 import Reader from "./Reader";
 import Catalog from "./Catalog";
+import ReadingHome from "./ReadingHome";
 import UserSyncStatus from "./UserSyncStatus";
 import LookupHistory from "./LookupHistory";
 import type { LocalBook } from "./localBook";
@@ -27,18 +29,13 @@ type ProbeReport = {
 export default function App() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<LocalBook>();
-  type Tab = "library" | "reader" | "history" | "settings";
-  const [tab, setTab] = useState<Tab>("library");
-  const tabRef = useRef<Tab>("library");
+  type Tab = "home" | "library" | "reader" | "history" | "settings";
+  const [tab, setTab] = useState<Tab>("home");
+  const tabRef = useRef<Tab>("home");
   function navigate(next: Tab) {
     setError("");
     if (next === tabRef.current) return;
-    if (next === "library") {
-      history.back();
-      return;
-    }
-    if (tabRef.current === "library") history.pushState({ tmwTab: next }, "");
-    else history.replaceState({ tmwTab: next }, "");
+    history.pushState({ tmwTab: next }, "");
     tabRef.current = next;
     setTab(next);
     localStorage.setItem("tmw-screen", next);
@@ -46,7 +43,7 @@ export default function App() {
   useEffect(() => {
     const back = () => {
       if (history.state?.tmwLookup || history.state?.tmwReaderMenu) return;
-      const next = (history.state?.tmwTab ?? "library") as Tab;
+      const next = (history.state?.tmwTab ?? "home") as Tab;
       tabRef.current = next;
       setTab(next);
       localStorage.setItem("tmw-screen", next);
@@ -94,6 +91,13 @@ export default function App() {
       window.removeEventListener("popstate", back);
     };
   }, []);
+  const [homeFilter, setHomeFilter] = useState<{filter: string; revision: number}>();
+  function openBook(book: LocalBook) {
+    setError(""); setSelected(book);
+    const descriptor = {name: book.name,id: book.id,file: book.file,catalog: book.catalog};
+    localStorage.setItem("tmw-last-download", JSON.stringify(descriptor));
+    navigate("reader");
+  }
   const [report, setReport] = useState<ProbeReport | null>(null);
 
   const [busy, setBusy] = useState(false);
@@ -119,35 +123,26 @@ export default function App() {
           文
         </div>
         <div>
-          <p className="eyebrow">YOUR READING COMPANION</p>
           <h1>TMW Library</h1>
         </div>
         <span className="offline-badge">Offline ready</span>
       </header>
       <div className="screen-content">
         {error && tab !== "settings" && <div role="alert"><p>{error}</p><button onClick={() => setError("")}>Dismiss</button></div>}
-        {tab === "library" && (
-          <>
+        {tab === "home" && <ReadingHome onOpen={openBook} onLibrary={(filter = "") => {
+          setHomeFilter(current => ({filter, revision: (current?.revision ?? 0)+1})); navigate("library");
+        }} />}
+        <div hidden={tab !== "library"}>
             <div className="screen-heading">
               <h2>Your library</h2>
               <p>Japanese books, wherever you are.</p>
             </div>
             <Catalog
-              onOpen={(book) => {
-                setError("");
-                setSelected(book);
-                const descriptor = {
-                  name: book.name,
-                  id: book.id,
-                  file: book.file,
-                  catalog: book.catalog,
-                };
-                localStorage.setItem("tmw-last-download", JSON.stringify(descriptor));
-                navigate("reader");
-              }}
+              active={tab === "library"}
+              homeFilter={homeFilter}
+              onOpen={openBook}
             />
-          </>
-        )}
+        </div>
         {tab === "reader" && (
           <Reader
             onExit={() => history.go(history.state?.tmwReaderMenu ? -2 : -1)}
@@ -170,6 +165,7 @@ export default function App() {
           <section className="settings-panel">
             <ConnectionSettings />
             <RecoverySettings />
+            <SeriesPreferences />
             {tab === "settings" && <DictionaryManager />}
             <section className="space-y-4 rounded-2xl bg-slate-800 p-5">
               <h2 className="text-xl font-medium">Offline dependency check</h2>
@@ -257,13 +253,13 @@ export default function App() {
         </div>
       </div>
       <nav className="bottom-nav" aria-label="Main navigation">
-        {(["library", "reader", "history", "settings"] as Tab[]).map((item, i) => (
+        {(["home", "library", "reader", "history", "settings"] as Tab[]).map((item, i) => (
           <button
             key={item}
             aria-current={tab === item ? "page" : undefined}
             onClick={() => navigate(item)}
           >
-            <span aria-hidden="true">{["▤", "本", "◷", "⚙"][i]}</span>
+            <span aria-hidden="true">{["⌂", "▤", "本", "◷", "⚙"][i]}</span>
             {item === "library" ? "Library" : item[0].toUpperCase() + item.slice(1)}
           </button>
         ))}

@@ -61,3 +61,6 @@ apps/android/src-tauri/assets/*.tmp
 *.sqlite3-wal
 *.sqlite3-journal
 *.sqlite3.tmp-journal
+
+# Generated locally from private catalog metadata (contains library paths)
+src-tauri/src/db/series_candidates.json
