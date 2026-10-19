@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { GeneratedCover } from "./GeneratedCover";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { EpubReader } from "../features/reader/EpubReader";
 
@@ -58,7 +59,7 @@ export function ContinueReading({ language, onLibrary, onRoots, showCovers = tru
       <div className={compact ? "resume-rows" : "grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6"}>
         {books.map(book => <article key={book.id} className="group relative min-w-0">
           <button disabled={!book.isAvailable} className="resume-book-button w-full text-left disabled:opacity-50" onClick={() => setReaderId(book.id)} aria-label={`${ja ? "続きを読む" : "Resume"}: ${book.title}`}>
-            <ResumeCover key={`${book.id}-${showCovers}`} path={showCovers ? book.coverPath : null} />
+            <ResumeCover key={`${book.id}-${showCovers}`} path={showCovers ? book.coverPath : null} title={book.title} />
             <div className="resume-book-info"><h3 className="mt-3 line-clamp-2 font-medium" title={book.title}>{book.title}</h3>
             <p className="truncate text-sm text-stone-400">{book.creator}</p>
             <p className="mt-2 text-xs text-stone-400">{new Intl.DateTimeFormat(ja ? "ja-JP" : "en", { dateStyle: "medium", timeStyle: "short" }).format(book.lastReadAt * 1000)}</p>
@@ -75,7 +76,7 @@ export function ContinueReading({ language, onLibrary, onRoots, showCovers = tru
   </section>;
 }
 
-function ResumeCover({ path }: { path: string | null }) {
+function ResumeCover({ path, title }: { path: string | null; title: string }) {
   const [broken, setBroken] = useState(false);
-  return <div className="resume-cover aspect-[2/3] overflow-hidden rounded-xl bg-stone-900">{path && !broken ? <img src={convertFileSrc(path)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken(true)} /> : <div className="grid h-full place-items-center text-3xl text-amber-200/60">本</div>}</div>;
+  return <div className="resume-cover aspect-[2/3] overflow-hidden rounded-xl bg-stone-900">{path && !broken ? <img src={convertFileSrc(path)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken(true)} /> : <GeneratedCover title={title} />}</div>;
 }

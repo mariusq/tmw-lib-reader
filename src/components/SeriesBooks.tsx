@@ -1,11 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { GeneratedCover } from "./GeneratedCover";
 import { useState } from "react";
 
 import { groupSeriesCopies, type SeriesBook } from "./seriesCopyGroups";
 
 function Thumbnail({ book, showCovers, grid }: { book: SeriesBook; showCovers: boolean; grid: boolean }) {
   const [broken, setBroken] = useState(false);
-  return <div className={grid ? "aspect-[2/3] w-full overflow-hidden rounded-lg bg-stone-800" : "h-24 w-16 shrink-0 overflow-hidden rounded-lg bg-stone-800"}>{showCovers && book.effectiveCoverPath && !broken ? <img className="h-full w-full object-cover" src={convertFileSrc(book.effectiveCoverPath)} alt="" loading="lazy" onError={() => setBroken(true)} /> : <span className="grid h-full place-items-center text-amber-200">本</span>}</div>;
+  return <div className={grid ? "aspect-[2/3] w-full overflow-hidden rounded-lg bg-stone-800" : "h-24 w-16 shrink-0 overflow-hidden rounded-lg bg-stone-800"}>{showCovers && book.effectiveCoverPath && !broken ? <img className="h-full w-full object-cover" src={convertFileSrc(book.effectiveCoverPath)} alt="" loading="lazy" onError={() => setBroken(true)} /> : <GeneratedCover title={book.effectiveTitle} />}</div>;
 }
 
 export function SeriesBooks({ books, groupCopies, showCovers, layout = "list", language, hasMore, onOpen, selectedIds = [], onToggle }: { books: SeriesBook[]; layout?: "grid" | "list"; groupCopies: boolean; showCovers: boolean; language: "ja" | "en"; hasMore: boolean; onOpen: (id: number) => void; selectedIds?: number[]; onToggle?: (id: number) => void }) {
