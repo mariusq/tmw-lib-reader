@@ -1,5 +1,20 @@
 # TMW EPUB Library — agent guide
 
+2026-10-19 desktop comfort pass: library and series grids use a responsive
+auto-fill grid (min 9rem cards; ~6 columns at 1280px instead of 4) with a subtle
+cover hover lift. Selection checkboxes appear on hover/focus or once any book is
+selected (always on touch). Available books show a hover/focus ▶ Read pill that
+opens the reader at the saved position without opening Book Details. Book Details
+has a primary Read book button, dimmed backdrop, and Escape/backdrop close that
+confirms before discarding unsaved corrections. Ctrl+F or / focuses library search
+while browsing. A sidebar indicator shows scan progress away from Library Roots.
+The batch-tag bar is localized; Home day detail shows a formatted date. Storage,
+commands and reader behavior are unchanged. Approximately 15 minutes investigation/
+implementation and 5 minutes validation: desktop TypeScript, targeted lint, 25
+component tests and frontend build passed; mocked-backend browser preview checked
+grid density, hover reveal, Ctrl+F, backdrop and Escape. Interactive Windows
+acceptance and executable packaging remain pending; no commit.
+
 2026-10-19 reading-position sync correction:
 
 Desktop: progress saves now require deliberate navigation; layout relocations only
